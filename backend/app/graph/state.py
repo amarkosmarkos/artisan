@@ -35,6 +35,7 @@ class FlowState(TypedDict, total=False):
     sender_company_id: Optional[str]
     sender_icp: Optional[ICP]
     sender_vp: Optional[ValueProposition]
+    sender_vps: list[ValueProposition]
     persona: Optional[PersonaInput]
     # Optional persona scoping for target runs.
     persona_id: Optional[str]
@@ -58,6 +59,7 @@ class FlowState(TypedDict, total=False):
     # ---- Sender outputs ----
     icp: Optional[ICP]
     value_proposition: Optional[ValueProposition]
+    value_propositions: list[ValueProposition]
 
     # ---- Target outputs ----
     strategy: Optional[StrategyArtifact]
@@ -83,6 +85,7 @@ def make_initial_state(
     sender_company_id: Optional[str] = None,
     sender_icp: Optional[ICP] = None,
     sender_vp: Optional[ValueProposition] = None,
+    sender_vps: Optional[list[ValueProposition]] = None,
     persona: Optional[PersonaInput] = None,
     persona_id: Optional[str] = None,
 ) -> FlowState:
@@ -93,6 +96,7 @@ def make_initial_state(
         sender_company_id=sender_company_id,
         sender_icp=sender_icp,
         sender_vp=sender_vp,
+        sender_vps=sender_vps or ([sender_vp] if sender_vp else []),
         persona=persona,
         persona_id=persona_id,
         sections_by_id={},
@@ -109,6 +113,7 @@ def make_initial_state(
         web_search_done=False,
         icp=None,
         value_proposition=None,
+        value_propositions=[],
         strategy=None,
         emails=[],
         claim_map=[],

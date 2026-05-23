@@ -76,6 +76,13 @@ export function normalizeStage(stage: string): StageKey | null {
     return "planner";
   if (stage === "fetch_more") return "fetch_more";
   if (stage === "web_search" || stage === "web_search_done") return "web_search";
+  if (
+    stage === "synthesis" ||
+    stage === "synthesis_progress" ||
+    stage === "icp_done" ||
+    stage === "vp_done"
+  )
+    return "icp";
   if (stage === "icp") return "icp";
   if (stage === "vp") return "vp";
   if (stage === "strategy" || stage === "strategy_done") return "strategy";

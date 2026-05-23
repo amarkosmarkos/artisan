@@ -114,21 +114,53 @@ function deriveStageState(events: ProgressEvent[], stages: readonly { key: Stage
       case "web_search_done":
         setSummary("web_search", `${num(d.sections)} new sections`);
         break;
+      case "synthesis":
+      case "synthesis_progress":
+        if (typeof d.message === "string" && d.message) {
+          setSummary("icp", d.message);
+          setSummary("vp", d.message);
+        }
+        break;
       case "icp":
-        setSummary("icp", "synthesizing");
+        setSummary(
+          "icp",
+          typeof d.message === "string" && d.message ? d.message : "Synthesizing ICP…",
+        );
+        break;
+      case "icp_done":
+        setSummary("icp", "ICP ready");
         break;
       case "vp":
-        setSummary("vp", "synthesizing");
+        setSummary(
+          "vp",
+          typeof d.message === "string" && d.message
+            ? d.message
+            : "Synthesizing value proposition(s)…",
+        );
+        break;
+      case "vp_done":
+        setSummary(
+          "vp",
+          num(d.count) > 1
+            ? `${num(d.count)} value propositions`
+            : String(d.primary || "Value proposition ready"),
+        );
         break;
       case "strategy":
         setSummary("strategy", `${num(d.observations)} observations`);
         break;
-      case "strategy_done":
+      case "strategy_done": {
+        const vpLabel =
+          (typeof d.selected_vp_label === "string" && d.selected_vp_label) ||
+          (typeof d.selected_vp_id === "string" && d.selected_vp_id) ||
+          "";
+        const vpSuffix = vpLabel ? ` · vp: ${vpLabel}` : "";
         setSummary(
           "strategy",
-          `${String(d.fit_level || "—")} · ${String(d.contact_decision || "—")} · ${num(d.angles)} angles`,
+          `${String(d.fit_level || "—")} · ${String(d.contact_decision || "—")} · ${num(d.angles)} angles${vpSuffix}`,
         );
         break;
+      }
       case "write_emails":
         setSummary("write_emails", "drafting pain + trigger");
         break;

@@ -4,6 +4,7 @@ import * as React from "react";
 import { motion } from "framer-motion";
 import {
   ArrowLeft,
+  ArrowRight,
   BarChart3,
   Check,
   Copy,
@@ -26,6 +27,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useEvidenceLookup } from "@/components/claim-evidence";
 import { EvidenceList, ExpandableEvidence } from "./evidence-popover";
+import { SelectedValuePropositionCard } from "./selected-vp-card";
 import { cn } from "@/lib/utils";
 import type {
   Angle,
@@ -38,6 +40,7 @@ interface Props {
   result: TargetResponse;
   onBack: () => void;
   onShowAnalytics: () => void;
+  onNewTarget?: () => void;
 }
 
 type BadgeVariant =
@@ -68,7 +71,12 @@ const DECISION_VARIANT: Record<string, BadgeVariant> = {
   skip: "destructive",
 };
 
-export function StepOutreach({ result, onBack, onShowAnalytics }: Props) {
+export function StepOutreach({
+  result,
+  onBack,
+  onShowAnalytics,
+  onNewTarget,
+}: Props) {
   const evidenceIds = React.useMemo(() => {
     const ids = result.observations.map((o) => o.observation_id);
     for (const a of result.strategy.strategy.angles) {
@@ -76,6 +84,9 @@ export function StepOutreach({ result, onBack, onShowAnalytics }: Props) {
     }
     for (const e of result.emails) {
       for (const c of e.claims) ids.push(...c.evidence_refs);
+    }
+    if (result.selected_value_proposition) {
+      ids.push(...result.selected_value_proposition.evidence_refs);
     }
     return ids;
   }, [result]);
@@ -99,9 +110,25 @@ export function StepOutreach({ result, onBack, onShowAnalytics }: Props) {
         <Button variant="ghost" size="sm" onClick={onBack}>
           <ArrowLeft className="h-4 w-4" /> ICP
         </Button>
-        <Button variant="outline" size="sm" onClick={onShowAnalytics}>
-          <BarChart3 className="h-4 w-4" /> Analytics
-        </Button>
+        <div className="flex gap-2">
+          {onNewTarget && (
+            <Button variant="default" size="sm" onClick={onNewTarget}>
+              <ArrowRight className="h-4 w-4" /> Add another target
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={onShowAnalytics}>
+            <BarChart3 className="h-4 w-4" /> Analytics
+          </Button>
+        </div>
+      </div>
+
+      <div className="mb-6">
+        <SelectedValuePropositionCard
+          strategy={strategy}
+          selectedVp={result.selected_value_proposition ?? null}
+          senderVps={result.sender_value_propositions}
+          evidenceById={evidenceById}
+        />
       </div>
 
       <div className="grid gap-6 md:grid-cols-3">

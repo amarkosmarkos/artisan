@@ -145,7 +145,14 @@ def _persist_run_metrics(
     return run_id
 
 
-def _load_sender_artifacts(sender_company_id: str) -> tuple[ICP, ValueProposition] | None:
+def _load_sender_artifacts(
+    sender_company_id: str,
+) -> tuple[ICP, list[ValueProposition], ValueProposition] | None:
+    from .synthesis.value_props_store import (
+        parse_stored_value_props,
+        primary_value_proposition,
+    )
+
     icp_row = fetchone(
         "SELECT payload FROM icps WHERE company_id = ?", (sender_company_id,)
     )
@@ -154,9 +161,13 @@ def _load_sender_artifacts(sender_company_id: str) -> tuple[ICP, ValuePropositio
     )
     if not icp_row or not vp_row:
         return None
+    vps = parse_stored_value_props(json.loads(vp_row["payload"]))
+    if not vps:
+        return None
     return (
         ICP.model_validate(json.loads(icp_row["payload"])),
-        ValueProposition.model_validate(json.loads(vp_row["payload"])),
+        vps,
+        primary_value_proposition(vps),
     )
 
 
@@ -216,7 +227,7 @@ async def run_target_flow_async(
         raise ValueError(
             f"unknown sender_company_id={sender_company_id}; run sender flow first"
         )
-    sender_icp, sender_vp = sender_pair
+    sender_icp, sender_vps, sender_vp = sender_pair
 
     llm = get_llm()
     nli = get_nli()
@@ -256,6 +267,7 @@ async def run_target_flow_async(
             sender_company_id=sender_company_id,
             sender_icp=sender_icp,
             sender_vp=sender_vp,
+            sender_vps=sender_vps,
             persona=persona,
             persona_id=persona_id,
         )

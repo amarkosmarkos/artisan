@@ -32,7 +32,9 @@ def build_sender_graph(*, llm: LLMClient, nli: NliValidator):
 
     sg.add_node("sender_crawl", nodes.make_crawl_node())
     sg.add_node("sender_fetch_more", nodes.make_crawl_node(fetch_more=True))
-    sg.add_node("sender_extract", nodes.make_extract_node(llm=llm, task="sender"))
+    sg.add_node(
+        "sender_extract", nodes.make_extract_node(llm=llm, nli=nli, task="sender")
+    )
     sg.add_node("sender_validate", nodes.make_validate_node(nli=nli))
     sg.add_node("planner", nodes.make_planner_node(llm=llm, task="sender_icp"))
     sg.add_node("sender_synthesize", nodes.make_sender_synthesize_node(llm=llm))
@@ -67,7 +69,10 @@ async def run_sender_graph(
     final: FlowState = await graph.ainvoke(initial_state)  # type: ignore[assignment]
     observations: list[Observation] = final.get("observations") or []
     icp: ICP = final.get("icp") or ICP()
+    vps: list[ValueProposition] = final.get("value_propositions") or []
     vp: ValueProposition = final.get("value_proposition") or ValueProposition()
+    if not vps and vp.customer:
+        vps = [vp]
     tracker = final["tracker"]
     tracker.metrics.tokens_in = final["usage"].tokens_in
     tracker.metrics.tokens_out = final["usage"].tokens_out
@@ -78,6 +83,7 @@ async def run_sender_graph(
         sender_url=final["homepage_url"],
         icp=icp,
         value_proposition=vp,
+        value_propositions=vps or ([vp] if vp.customer or vp.pain else []),
         observations=observations,
         metrics=tracker.metrics,
     )

@@ -5,12 +5,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Activity,
   Building2,
   ChevronRight,
   Compass,
   Megaphone,
   Plus,
+  Settings,
   Target as TargetIcon,
   UserRound,
 } from "lucide-react";
@@ -40,8 +40,8 @@ const NAV: NavItem[] = [
   },
   {
     href: "/metrics",
-    label: "Metrics",
-    icon: <Activity className="h-4 w-4" />,
+    label: "Admin",
+    icon: <Settings className="h-4 w-4" />,
     matchPrefix: "/metrics",
   },
 ];

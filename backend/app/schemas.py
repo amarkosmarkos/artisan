@@ -113,6 +113,8 @@ class ICP(BaseModel):
 
 
 class ValueProposition(BaseModel):
+    id: str = ""
+    label: str = ""  # e.g. "Commercial aviation", "Defense"
     customer: str = ""
     pain: str = ""
     outcome: str = ""
@@ -176,6 +178,16 @@ class Strategy(BaseModel):
 class StrategyArtifact(BaseModel):
     fit_assessment: FitAssessment
     strategy: Strategy
+    # Best-matching sender value proposition for this target/persona (if multiple exist).
+    selected_value_proposition_id: str | None = None
+    # Echo of the chosen VP's label so the UI can render the selection without
+    # a second lookup. Resolved server-side; the LLM also fills it.
+    selected_value_proposition_label: str = ""
+    # Short justification of WHY this VP was picked for this target+persona.
+    selection_reason: str = ""
+    # One-sentence high-level messaging angle anchored to the selected VP.
+    # Distinct from the per-angle hypotheses inside Strategy.angles.
+    messaging_angle: str = ""
 
 
 # ---------- Email + claims ----------
@@ -252,7 +264,8 @@ class SenderResponse(BaseModel):
     company_id: str
     sender_url: str
     icp: ICP
-    value_proposition: ValueProposition
+    value_proposition: ValueProposition  # primary / highest-confidence VP
+    value_propositions: list[ValueProposition] = Field(default_factory=list)
     observations: list[Observation]
     metrics: RunMetrics
 
@@ -278,3 +291,11 @@ class TargetResponse(BaseModel):
     emails: list[Email]
     claim_map: list[ClaimMapEntry]
     metrics: RunMetrics
+    # Resolved value proposition used to drive this target's strategy + emails.
+    # When multiple VPs exist on the sender, this is the one the strategy
+    # selected. Always populated when sender VPs exist so the frontend never
+    # needs to guess.
+    selected_value_proposition: ValueProposition | None = None
+    # All sender value propositions in scope at the time of this run, so the
+    # UI can show "alternatives" alongside the selected one.
+    sender_value_propositions: list[ValueProposition] = Field(default_factory=list)

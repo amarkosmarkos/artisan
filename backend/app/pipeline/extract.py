@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Callable, Literal
+from typing import Callable, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -63,16 +63,21 @@ class _ExtractionResult(BaseModel):
     observations: list[_ExtractedObservation] = Field(default_factory=list)
 
 
-_SYSTEM_SENDER = """You extract commercially-relevant observations from website sections of a SAAS/B2B company that is *selling* a product.
+class BatchProgressCallback(Protocol):
+    def __call__(self, batch_obs: list[Observation], done: int, total: int) -> None: ...
+
+
+_SYSTEM_SENDER = """You extract commercially-relevant observations from website sections of a company that is selling products, services, platforms, systems, or solutions.
 
 For each section, write ONE-SENTENCE observations capturing:
 - target industries / verticals served
-- customer segments and sizes (SMB, mid-market, enterprise)
+- customer segments and sizes (SMB, mid-market, enterprise, public sector, large industrial buyers, operators, etc.)
 - buyer roles (titles, departments) explicitly named
 - use cases and workflows the product addresses
 - pricing model, plans, tiers
 - pain points the company claims to solve
 - the value proposition (customer + pain + outcome + mechanism)
+- the company's broad business lines or product/service categories
 - triggers that lead a customer to buy (events, changes, problems)
 - explicit non-customers / negative ICP (e.g. "not for individuals")
 - capabilities, integrations, tech footprint
@@ -131,6 +136,7 @@ async def extract_observations(
     batch_size: int | None = None,
     concurrency: int | None = None,
     on_batch_done: Callable[[int, int], None] | None = None,
+    on_batch_observations: BatchProgressCallback | None = None,
 ) -> list[Observation]:
     """Extract observations from sections in parallel batches.
 
@@ -201,7 +207,15 @@ async def extract_observations(
                 obs = []
         async with done_lock:
             done_counter += 1
-            if on_batch_done:
+            if on_batch_observations:
+                try:
+                    on_batch_observations(obs, done_counter, total)
+                except Exception:  # noqa: BLE001
+                    log.debug(
+                        "extract: on_batch_observations raised; ignoring",
+                        exc_info=True,
+                    )
+            elif on_batch_done:
                 try:
                     on_batch_done(done_counter, total)
                 except Exception:  # noqa: BLE001

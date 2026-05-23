@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ChevronRight } from "lucide-react";
+import { ChevronRight, Settings } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -35,11 +35,11 @@ export default function MetricsPage() {
     <div className="space-y-8">
       <header className="rounded-xl border border-border/60 bg-sender-soft p-5">
         <div className="flex items-center gap-2">
-          <Activity className="h-4 w-4 text-[hsl(var(--sender))]" />
-          <Badge variant="sender">technical</Badge>
+          <Settings className="h-4 w-4 text-[hsl(var(--sender))]" />
+          <Badge variant="sender">admin</Badge>
         </div>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight">
-          Metrics &amp; pipeline
+          Admin
         </h1>
         <p className="mt-1 text-sm text-muted-foreground max-w-2xl">
           Operator view: latency, tokens, cost, claim support, planner

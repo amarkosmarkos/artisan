@@ -63,24 +63,27 @@ export function SenderTargetsPanel({ senderCompanyId }: Props) {
     queryFn: () => listSenderTargets(senderCompanyId),
   });
 
+  const invalidateAll = React.useCallback(() => {
+    queryClient.invalidateQueries({
+      queryKey: ["sender-targets", senderCompanyId],
+    });
+    // Sidebar reads a different key; invalidate it too so it stays in sync.
+    queryClient.invalidateQueries({
+      queryKey: ["sidebar-targets", senderCompanyId],
+    });
+    queryClient.invalidateQueries({ queryKey: ["sidebar-senders"] });
+  }, [queryClient, senderCompanyId]);
+
   const addTarget = useMutation({
     mutationFn: (target_url: string) =>
       addSenderTarget(senderCompanyId, target_url),
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["sender-targets", senderCompanyId],
-      });
-    },
+    onSuccess: invalidateAll,
   });
 
   const removeTarget = useMutation({
     mutationFn: (targetCompanyId: string) =>
       removeSenderTarget(senderCompanyId, targetCompanyId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["sender-targets", senderCompanyId],
-      });
-    },
+    onSuccess: invalidateAll,
   });
 
   const [targetUrl, setTargetUrl] = React.useState("");
@@ -186,26 +189,27 @@ function SenderTargetCard({
     queryFn: () => listPersonas(target.company_id),
   });
 
+  const invalidatePersonas = React.useCallback(() => {
+    queryClient.invalidateQueries({
+      queryKey: ["personas", target.company_id],
+    });
+    queryClient.invalidateQueries({
+      queryKey: ["sidebar-personas", target.company_id],
+    });
+  }, [queryClient, target.company_id]);
+
   const create = useMutation({
     mutationFn: (input: {
       role: string;
       seniority: Seniority;
       name?: string;
     }) => createPersona(target.company_id, input),
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["personas", target.company_id],
-      });
-    },
+    onSuccess: invalidatePersonas,
   });
 
   const remove = useMutation({
     mutationFn: (personaId: string) => deletePersona(personaId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["personas", target.company_id],
-      });
-    },
+    onSuccess: invalidatePersonas,
   });
 
   const generate = useMutation({

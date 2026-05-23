@@ -21,10 +21,22 @@ export function EvidenceList({
   evidenceById: externalEvidence,
   inline,
 }: Props) {
-  const resolved = useEvidenceLookup(
-    externalEvidence ? [] : evidenceRefs,
+  const missingRefs = React.useMemo(
+    () =>
+      externalEvidence
+        ? evidenceRefs.filter((id) => !externalEvidence.has(id))
+        : evidenceRefs,
+    [evidenceRefs, externalEvidence],
   );
-  const evidenceById = externalEvidence ?? resolved;
+  const resolved = useEvidenceLookup(missingRefs);
+  const evidenceById = React.useMemo(() => {
+    if (!externalEvidence) return resolved;
+    const merged = new Map(externalEvidence);
+    for (const [id, ev] of resolved) {
+      merged.set(id, ev);
+    }
+    return merged;
+  }, [externalEvidence, resolved]);
 
   const items = evidenceRefs
     .map((id) => evidenceById.get(id))

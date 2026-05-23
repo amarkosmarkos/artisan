@@ -65,6 +65,7 @@ def create_app() -> FastAPI:
         return {
             "ok": True,
             "llm_model": settings.llm_model,
+            "writer_llm_model": settings.writer_llm_model or settings.llm_model,
             "embedding_model": settings.embedding_model,
             "nli_model": settings.nli_model,
         }

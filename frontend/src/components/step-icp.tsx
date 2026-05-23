@@ -20,7 +20,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useEvidenceLookup } from "@/components/claim-evidence";
+import {
+  evidenceFromObservation,
+  useEvidenceLookup,
+} from "@/components/claim-evidence";
 import { ExpandableEvidence, EvidenceList } from "./evidence-popover";
 import type {
   FieldWithEvidence,
@@ -46,7 +49,19 @@ export function StepIcp({ sender, onContinue, running }: Props) {
     () => collectSenderEvidenceIds(sender),
     [sender],
   );
-  const evidenceById = useEvidenceLookup(evidenceIds);
+  const resolvedEvidenceById = useEvidenceLookup(evidenceIds);
+  const evidenceById = React.useMemo(() => {
+    const seeded = new Map(
+      sender.observations.map((o) => [
+        o.observation_id,
+        evidenceFromObservation(o),
+      ]),
+    );
+    for (const [id, ev] of resolvedEvidenceById) {
+      seeded.set(id, ev);
+    }
+    return seeded;
+  }, [sender.observations, resolvedEvidenceById]);
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -81,7 +96,30 @@ export function StepIcp({ sender, onContinue, running }: Props) {
 
       <div className="grid gap-6 md:grid-cols-2">
         <ICPCard icp={sender.icp} evidenceById={evidenceById} />
-        <VPCard vp={sender.value_proposition} evidenceById={evidenceById} />
+        <div className="space-y-4">
+          {vpsForDisplay(sender).map((vp, i) => (
+            <VPCard
+              key={vp.id || `vp-${i}`}
+              vp={vp}
+              evidenceById={evidenceById}
+              showLabel={
+                (sender.value_propositions?.length ?? 0) > 1 ||
+                Boolean(vp.label)
+              }
+            />
+          ))}
+          {vpsForDisplay(sender).length === 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Value Proposition</CardTitle>
+                <CardDescription>
+                  No value proposition was synthesized from the sender
+                  evidence.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          )}
+        </div>
       </div>
 
       <form
@@ -141,16 +179,30 @@ export function StepIcp({ sender, onContinue, running }: Props) {
   );
 }
 
+function vpsForDisplay(sender: SenderResponse): ValueProposition[] {
+  if (sender.value_propositions && sender.value_propositions.length > 0) {
+    return sender.value_propositions.filter(
+      (vp): vp is ValueProposition => Boolean(vp),
+    );
+  }
+  return sender.value_proposition ? [sender.value_proposition] : [];
+}
+
 function collectSenderEvidenceIds(sender: SenderResponse): string[] {
-  const ids = [...sender.value_proposition.evidence_refs];
-  const fields = [
-    sender.icp.target_industries,
-    sender.icp.size_bands,
-    sender.icp.likely_buyers,
-    sender.icp.common_triggers,
-    sender.icp.negative_icp,
-  ];
-  for (const f of fields) ids.push(...f.evidence_refs);
+  const ids: string[] = [];
+  for (const vp of vpsForDisplay(sender)) {
+    ids.push(...(vp.evidence_refs ?? []));
+  }
+  if (sender.icp) {
+    const fields = [
+      sender.icp.target_industries,
+      sender.icp.size_bands,
+      sender.icp.likely_buyers,
+      sender.icp.common_triggers,
+      sender.icp.negative_icp,
+    ];
+    for (const f of fields) ids.push(...(f?.evidence_refs ?? []));
+  }
   return ids;
 }
 
@@ -214,9 +266,11 @@ function ICPCard({
 function VPCard({
   vp,
   evidenceById,
+  showLabel = false,
 }: {
   vp: ValueProposition;
   evidenceById: Map<string, import("@/lib/api").EvidenceRecord>;
+  showLabel?: boolean;
 }) {
   const fields: { label: string; value: string }[] = [
     { label: "Customer",  value: vp.customer },
@@ -227,7 +281,9 @@ function VPCard({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">Value Proposition</CardTitle>
+        <CardTitle className="text-base">
+          {showLabel && vp.label ? vp.label : "Value Proposition"}
+        </CardTitle>
         <CardDescription>
           <span className="flex items-center gap-2">
             <ConfidenceBar confidence={vp.confidence} />

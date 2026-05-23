@@ -31,6 +31,7 @@ export interface SenderDetail extends CompanyRow {
   counts: CompanyCounts;
   icp: ICP | null;
   value_proposition: ValueProposition | null;
+  value_propositions?: ValueProposition[];
 }
 
 export interface PersonaRunRow {
@@ -43,6 +44,8 @@ export interface PersonaRunRow {
     sender_company_id: string;
     persona: PersonaInput;
     strategy: StrategyArtifact;
+    selected_value_proposition?: ValueProposition | null;
+    sender_value_propositions?: ValueProposition[];
   } | null;
   emails: Email[];
   claim_map: ClaimMapEntry[];

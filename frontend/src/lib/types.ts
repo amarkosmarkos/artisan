@@ -38,6 +38,8 @@ export interface ICP {
 }
 
 export interface ValueProposition {
+  id?: string;
+  label?: string;
   customer: string;
   pain: string;
   outcome: string;
@@ -88,6 +90,10 @@ export interface Strategy {
 export interface StrategyArtifact {
   fit_assessment: FitAssessment;
   strategy: Strategy;
+  selected_value_proposition_id?: string | null;
+  selected_value_proposition_label?: string;
+  selection_reason?: string;
+  messaging_angle?: string;
 }
 
 export interface EmailClaim {
@@ -155,6 +161,7 @@ export interface SenderResponse {
   sender_url: string;
   icp: ICP;
   value_proposition: ValueProposition;
+  value_propositions?: ValueProposition[];
   observations: Observation[];
   metrics: RunMetrics;
 }
@@ -174,6 +181,8 @@ export interface TargetResponse {
   emails: Email[];
   claim_map: ClaimMapEntry[];
   metrics: RunMetrics;
+  selected_value_proposition?: ValueProposition | null;
+  sender_value_propositions?: ValueProposition[];
 }
 
 export interface ProgressEvent {

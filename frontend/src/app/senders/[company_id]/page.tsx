@@ -147,10 +147,13 @@ export default function SenderDetailPage() {
   }
 
   const obsRows = observations.data?.observations ?? [];
-  const evidenceIdsForArtifacts = collectArtifactEvidenceIds(
-    data.icp,
-    data.value_proposition,
-  );
+  const vps =
+    data.value_propositions?.length
+      ? data.value_propositions
+      : data.value_proposition
+        ? [data.value_proposition]
+        : [];
+  const evidenceIdsForArtifacts = collectArtifactEvidenceIds(data.icp, vps);
   return (
     <SenderBody
       data={data}
@@ -198,6 +201,12 @@ function SenderBody({
     return Array.from(s);
   }, [evidenceIdsForArtifacts, obsRows]);
   const evidence = useEvidenceLookup(allEvidenceIds);
+  const vps =
+    data.value_propositions?.length
+      ? data.value_propositions
+      : data.value_proposition
+        ? [data.value_proposition]
+        : [];
 
   // Group all observations by kind for the bucketed display.
   const grouped = React.useMemo(() => {
@@ -277,49 +286,54 @@ function SenderBody({
         </div>
       </header>
 
-      {/* --- Value Proposition --- */}
-      {data.value_proposition && (
-        <Card className="accent-sender bg-sender-soft">
-          <CardHeader className="pb-3">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <CardDescription>Value proposition</CardDescription>
-                <CardTitle className="text-base">
-                  Why customers buy
-                </CardTitle>
-              </div>
-              <Badge variant="sender">
-                conf {data.value_proposition.confidence.toFixed(2)}
-              </Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <VPField
-              label="Customer"
-              value={data.value_proposition.customer}
-            />
-            <VPField label="Pain" value={data.value_proposition.pain} />
-            <VPField
-              label="Outcome"
-              value={data.value_proposition.outcome}
-            />
-            <VPField
-              label="Mechanism"
-              value={data.value_proposition.mechanism}
-            />
-            <div className="pt-2">
-              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                Anchored evidence
-              </p>
-              <ClaimEvidence
-                claim="Composite VP statement above is grounded on these observations."
-                evidenceIds={data.value_proposition.evidence_refs}
-                evidence={evidence}
-                tone="claim"
-              />
-            </div>
-          </CardContent>
-        </Card>
+      {/* --- Value Proposition(s) --- */}
+      {vps.length > 0 && (
+        <section className="space-y-3">
+          <div>
+            <h2 className="text-sm font-semibold tracking-tight">
+              Value proposition{vps.length > 1 ? "s" : ""}
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              {vps.length > 1
+                ? "Distinct business lines detected from sender evidence"
+                : "Why customers buy"}
+            </p>
+          </div>
+          {vps.map((vp, i) => (
+            <Card key={vp.id || `vp-${i}`} className="accent-sender bg-sender-soft">
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <CardDescription>Value proposition</CardDescription>
+                    <CardTitle className="text-base">
+                      {vp.label || (vps.length > 1 ? `Offering ${i + 1}` : "Why customers buy")}
+                    </CardTitle>
+                  </div>
+                  <Badge variant="sender">
+                    conf {vp.confidence.toFixed(2)}
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <VPField label="Customer" value={vp.customer} />
+                <VPField label="Pain" value={vp.pain} />
+                <VPField label="Outcome" value={vp.outcome} />
+                <VPField label="Mechanism" value={vp.mechanism} />
+                <div className="pt-2">
+                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Anchored evidence
+                  </p>
+                  <ClaimEvidence
+                    claim="Composite VP statement above is grounded on these observations."
+                    evidenceIds={vp.evidence_refs}
+                    evidence={evidence}
+                    tone="claim"
+                  />
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </section>
       )}
 
       {/* --- ICP --- */}
@@ -632,7 +646,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 function collectArtifactEvidenceIds(
   icp: ICP | null,
-  vp: ValueProposition | null,
+  vps: ValueProposition[],
 ): string[] {
   const ids: string[] = [];
   if (icp) {
@@ -641,7 +655,7 @@ function collectArtifactEvidenceIds(
       ids.push(...(f?.evidence_refs ?? []));
     });
   }
-  if (vp) ids.push(...vp.evidence_refs);
+  vps.forEach((vp) => ids.push(...vp.evidence_refs));
   return ids;
 }
 

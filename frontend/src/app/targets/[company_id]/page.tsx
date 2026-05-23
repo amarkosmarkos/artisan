@@ -36,6 +36,7 @@ import {
   ObservationEvidenceCard,
   useEvidenceLookup,
 } from "@/components/claim-evidence";
+import { SelectedValuePropositionCard } from "@/components/selected-vp-card";
 import {
   deleteCompany,
   deleteEmail,
@@ -339,6 +340,8 @@ function PersonaPanel({
   const angles = strategy?.strategy.angles ?? [];
   const align = strategy?.strategy.persona_alignment;
   const senderCompanyId = persona.strategy?.sender_company_id ?? null;
+  const selectedVp = persona.strategy?.selected_value_proposition ?? null;
+  const senderVps = persona.strategy?.sender_value_propositions ?? [];
 
   // Collect all observation IDs referenced from angles + email claims so the
   // evidence resolver fetches them in one batch.
@@ -349,8 +352,9 @@ function PersonaPanel({
       e.claims.forEach((c) => ids.push(...c.evidence_refs)),
     );
     observations.forEach((o) => ids.push(o.observation_id));
+    if (selectedVp) ids.push(...selectedVp.evidence_refs);
     return ids;
-  }, [angles, persona.emails, observations]);
+  }, [angles, persona.emails, observations, selectedVp]);
 
   const evidence = useEvidenceLookup(refs);
 
@@ -463,6 +467,15 @@ function PersonaPanel({
             above to evaluate fit and produce two emails for this persona.
           </CardContent>
         </Card>
+      )}
+
+      {strategy && (
+        <SelectedValuePropositionCard
+          strategy={strategy}
+          selectedVp={selectedVp}
+          senderVps={senderVps}
+          evidenceById={evidence}
+        />
       )}
 
       {strategy && fit && (

@@ -29,7 +29,9 @@ from ..schemas import (
     Strategy,
     StrategyArtifact,
     TargetResponse,
+    ValueProposition,
 )
+from ..synthesis.value_props_store import resolve_value_proposition
 from ..services.embed import Embedder
 from ..services.external import ExternalSignalProvider
 from ..services.llm import LLMClient
@@ -51,7 +53,9 @@ def build_target_graph(
 
     g.add_node("target_crawl", nodes.make_crawl_node())
     g.add_node("target_fetch_more", nodes.make_crawl_node(fetch_more=True))
-    g.add_node("target_extract", nodes.make_extract_node(llm=llm, task="target"))
+    g.add_node(
+        "target_extract", nodes.make_extract_node(llm=llm, nli=nli, task="target")
+    )
     g.add_node("target_validate", nodes.make_validate_node(nli=nli))
     g.add_node("planner", nodes.make_planner_node(llm=llm, task="target_eval"))
     g.add_node(
@@ -142,6 +146,13 @@ async def run_target_graph(
             ),
         )
 
+    sender_vps: list[ValueProposition] = final.get("sender_vps") or []
+    selected_vp: ValueProposition | None = None
+    if sender_vps:
+        selected_vp = resolve_value_proposition(
+            sender_vps, strategy.selected_value_proposition_id
+        )
+
     return TargetResponse(
         target_company_id=final["company_id"],
         target_url=final["homepage_url"],
@@ -152,4 +163,6 @@ async def run_target_graph(
         emails=emails,
         claim_map=claim_map,
         metrics=tracker.metrics,
+        selected_value_proposition=selected_vp,
+        sender_value_propositions=sender_vps,
     )

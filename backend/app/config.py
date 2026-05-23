@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.1
     llm_max_retries: int = 2
     llm_timeout_s: float = 45.0
+    # Optional Azure deployment name for the email writer. Leave empty to use
+    # llm_model; set to your highest-quality deployment for better copy.
+    writer_llm_model: str = "gpt-5.4"
+    writer_llm_temperature: float = 0.55
 
     # Embeddings / NLI (HuggingFace, CPU)
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"

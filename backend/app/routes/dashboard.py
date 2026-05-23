@@ -87,13 +87,59 @@ def company_detail(company_id: str) -> dict:
             "SELECT payload FROM value_props WHERE company_id = ?", (company_id,)
         )
         detail["icp"] = json.loads(icp_row["payload"]) if icp_row else None
-        detail["value_proposition"] = (
-            json.loads(vp_row["payload"]) if vp_row else None
-        )
+        if vp_row:
+            from ..synthesis.value_props_store import (
+                parse_stored_value_props,
+                primary_value_proposition,
+            )
+
+            vps = parse_stored_value_props(json.loads(vp_row["payload"]))
+            detail["value_propositions"] = [
+                vp.model_dump(mode="json") for vp in vps
+            ]
+            detail["value_proposition"] = primary_value_proposition(vps).model_dump(
+                mode="json"
+            )
+        else:
+            detail["value_proposition"] = None
+            detail["value_propositions"] = []
     else:
         detail["personas"] = _target_persona_runs(company_id)
 
     return detail
+
+
+def _resolve_selected_vp(
+    sender_company_id: str | None, strategy_payload: dict
+) -> tuple[dict | None, list[dict]]:
+    """Look up the sender's stored VPs and resolve the strategy's selected one.
+
+    Returns ``(selected_vp_dict_or_None, all_sender_vp_dicts)``. Used by the
+    persisted-target dashboard endpoint so the UI never has to guess which
+    VP drove a strategy.
+    """
+    from ..synthesis.value_props_store import (
+        parse_stored_value_props,
+        resolve_value_proposition,
+    )
+
+    if not sender_company_id:
+        return None, []
+    vp_row = fetchone(
+        "SELECT payload FROM value_props WHERE company_id = ?",
+        (sender_company_id,),
+    )
+    if not vp_row:
+        return None, []
+    vps = parse_stored_value_props(json.loads(vp_row["payload"]))
+    if not vps:
+        return None, []
+    selected_id = (strategy_payload or {}).get("selected_value_proposition_id")
+    resolved = resolve_value_proposition(vps, selected_id)
+    return (
+        resolved.model_dump(mode="json") if resolved else None,
+        [vp.model_dump(mode="json") for vp in vps],
+    )
 
 
 def _target_persona_runs(target_company_id: str) -> list[dict]:
@@ -143,6 +189,19 @@ def _target_persona_runs(target_company_id: str) -> list[dict]:
         d["citations"] = json.loads(d["citations"] or "[]")
         claims_by_pid.setdefault(d.pop("persona_id"), []).append(d)
 
+    def _build_strategy_block(s_row: Any) -> dict:
+        strategy_payload = json.loads(s_row["payload"])
+        selected_vp, sender_vps = _resolve_selected_vp(
+            s_row["sender_company_id"], strategy_payload
+        )
+        return {
+            "sender_company_id": s_row["sender_company_id"],
+            "persona": json.loads(s_row["persona"]),
+            "strategy": strategy_payload,
+            "selected_value_proposition": selected_vp,
+            "sender_value_propositions": sender_vps,
+        }
+
     out: list[dict] = []
     seen_pids: set[str] = set()
     for p in personas:
@@ -156,15 +215,7 @@ def _target_persona_runs(target_company_id: str) -> list[dict]:
                 "role": p["role"],
                 "seniority": p["seniority"],
                 "created_at": p["created_at"],
-                "strategy": (
-                    {
-                        "sender_company_id": s["sender_company_id"],
-                        "persona": json.loads(s["persona"]),
-                        "strategy": json.loads(s["payload"]),
-                    }
-                    if s
-                    else None
-                ),
+                "strategy": _build_strategy_block(s) if s else None,
                 "emails": emails_by_pid.get(pid, []),
                 "claim_map": claims_by_pid.get(pid, []),
             }
@@ -183,11 +234,7 @@ def _target_persona_runs(target_company_id: str) -> list[dict]:
                 "role": persona_payload.get("role", "—"),
                 "seniority": persona_payload.get("seniority", "ic"),
                 "created_at": None,
-                "strategy": {
-                    "sender_company_id": s["sender_company_id"],
-                    "persona": persona_payload,
-                    "strategy": json.loads(s["payload"]),
-                },
+                "strategy": _build_strategy_block(s),
                 "emails": emails_by_pid.get(pid, []),
                 "claim_map": claims_by_pid.get(pid, []),
             }

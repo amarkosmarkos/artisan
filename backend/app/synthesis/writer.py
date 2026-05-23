@@ -1,15 +1,9 @@
 """Email writer.
 
-Two-pass design:
-
-1. **Pick** (LLM): pick 2-3 specific target observation_ids per angle that
-   the writer commits to citing. This forces concrete fact selection
-   *before* prose, instead of letting the model paraphrase the strategy
-   hypothesis as a generic opener.
-2. **Write** (LLM): write each email using only the picked facts. Every
-   picked observation_id MUST end up as a claim with that exact id in
-   ``evidence_refs``. The claim text must substring-appear in the body
-   (downstream ``claim_extract`` enforces this).
+Each outreach angle gets its own LLM call. The writer sees the selected sender
+value proposition, ICP, persona guidance, the single angle to write, and the
+retrieved target observations. It can decline an angle if the retrieved facts
+do not support a credible sales email.
 
 Inputs:
 - value proposition (sender)
@@ -27,7 +21,9 @@ import uuid
 
 from pydantic import BaseModel, Field
 
+from ..config import settings
 from ..schemas import (
+    Angle,
     AngleType,
     ClaimStatus,
     Email,
@@ -43,37 +39,7 @@ from ..services.llm import LLMClient, UsageAccumulator
 log = logging.getLogger(__name__)
 
 
-# ---------- Pass A: pick which facts to cite ----------
-
-class _PickedAngle(BaseModel):
-    type: AngleType
-    observation_ids: list[str] = Field(min_length=1, max_length=4)
-
-
-class _PickedFacts(BaseModel):
-    pain_led: _PickedAngle
-    trigger_led: _PickedAngle
-
-
-_PICKER_SYSTEM = """You select the most useful target facts for two outbound emails.
-
-INPUT: a list of validated TARGET OBSERVATIONS (each has an observation_id, a kind, and a short text), plus the high-level strategy hypotheses for the pain-led and trigger-led angles.
-
-TASK:
-For EACH angle, pick 2-3 observation_ids that:
-1. Are SPECIFIC to the target (not generic industry truisms).
-2. Make the angle's hypothesis concrete (a real product launch, a real funding round, a real hiring push, an explicit pain quote, etc.).
-3. Are actually present in the input (do not invent ids).
-
-Return STRICTLY JSON in this shape:
-{
-  "pain_led":    { "type": "pain_led",    "observation_ids": ["obs_xxx", "obs_yyy"] },
-  "trigger_led": { "type": "trigger_led", "observation_ids": ["obs_zzz", ...] }
-}
-"""
-
-
-# ---------- Pass B: write the two emails ----------
+# ---------- Per-angle email writer ----------
 
 class _ClaimDraft(BaseModel):
     text: str = Field(min_length=4, max_length=400)
@@ -81,42 +47,75 @@ class _ClaimDraft(BaseModel):
 
 
 class _EmailDraft(BaseModel):
-    subject: str = Field(min_length=4, max_length=180)
-    body: str = Field(min_length=20, max_length=2200)
-    claims: list[_ClaimDraft] = Field(min_length=1, max_length=5)
+    # Backward-compatible with previous prompt/schema. The writer no longer
+    # honors refusals, but accepting these fields prevents old model behavior
+    # from breaking structured parsing when it emits them.
+    should_write: bool = True
+    skip_reason: str = ""
+    subject: str = Field(default="", max_length=180)
+    body: str = Field(default="", max_length=2200)
+    claims: list[_ClaimDraft] = Field(default_factory=list, max_length=6)
 
 
-class _WriterDraft(BaseModel):
-    pain_led: _EmailDraft
-    trigger_led: _EmailDraft
-
-
-_WRITER_SYSTEM = """You write outbound emails grounded ONLY in evidence the system has selected for you.
+_WRITER_SYSTEM = """You are an expert B2B outbound sales writer.
 
 INPUTS:
-- Sender value proposition + ICP (sender-side positioning).
-- Persona (role, seniority) + persona_alignment guidance.
-- For each angle (pain_led, trigger_led): a small list of "picked facts". Each fact has an observation_id, a kind, and the exact text. THESE ARE THE ONLY TARGET FACTS YOU MAY USE.
+- Sender value proposition + ICP: what the sender can credibly offer.
+- Persona: who the email is addressed to and how they likely think.
+- Strategy angle: the intended framing for THIS one email.
+- Retrieved target observations: the only target-specific facts you may use.
+
+YOUR JOB:
+Always write one high-quality, credible sales email for the given angle, even
+when fit_assessment is weak/none or contact_decision is skip. Those fields are
+diagnostic context, not permission to refuse. Use the retrieved target
+observations to make the email specific when they help. You may connect those
+facts to the sender value proposition, but never invent facts about the target,
+their priorities, their pain, their tech stack, their projects, or their intent.
+
+If the retrieved observations are thin or the fit is poor, still write the
+email, but make it conservative: use softer language, avoid overstating pain,
+and position the note as exploratory rather than claiming clear need.
 
 OUTPUT (strict JSON):
 {
-  "pain_led":    { "subject": "...", "body": "...", "claims": [ { "text": "...", "evidence_refs": [observation_id, ...] }, ... ] },
-  "trigger_led": { "subject": "...", "body": "...", "claims": [...] }
+  "subject": "...",
+  "body": "...",
+  "claims": [
+    { "text": "...", "evidence_refs": ["obs_xxx"] }
+  ]
 }
 
-WRITING RULES:
-- Open the body with ONE specific picked fact, paraphrased into a single concrete sentence. NEVER open with "I understand that you are facing challenges" or any generic empathy preamble.
-- 4-7 short sentences total. Plain text. No markdown, no emojis, no signature placeholder.
-- The two emails MUST differ in opening sentence, framing, and call-to-action.
-- For EVERY picked fact you used, emit one claim:
-    * "text" must be a sentence that ALSO appears literally in "body" (claim text is a substring of body, lowercase-insensitive).
-    * "evidence_refs" must contain the matching observation_id.
-- Do not fabricate target facts beyond the picked ones. Generic sender-side statements ("we help X teams...") need no evidence_refs and should NOT appear in claims.
-- Persona shaping:
-    * Senior (VP / C-level / Founder): business outcome, ROI, pipeline impact. No mechanism deep-dives.
-    * Mid-level / IC: operational mechanism allowed. Be specific.
-- Respect persona_alignment.avoid (do not use those framings).
-- End with one low-friction CTA (a question, a 15-min ask, or "happy to share notes").
+SALES WRITING GUIDANCE:
+- Sound like a sharp human seller, not a template. Plain text, natural tone.
+- Structure the email with 2-4 short paragraphs:
+  1. Open with the most relevant retrieved target fact or trigger.
+  2. Explain why that fact might matter to this persona.
+  3. Connect the sender's value proposition to a plausible business outcome.
+  4. End with a low-friction CTA.
+- Be concise: usually 90-160 words. More is not better.
+- Prefer business outcomes for senior personas; use operational detail only when
+  the persona is closer to execution.
+- Use the strategy angle as direction, not a script. If the angle is weak,
+  adapt it into a credible exploratory note instead of refusing.
+- Use retrieved facts where they strengthen relevance. You do not need to use
+  every observation. Skip noisy or irrelevant facts.
+- Generic sender-side positioning is allowed, but target-specific statements
+  must be grounded in retrieved observations.
+- If no retrieved target fact is worth using, write a broader but still useful
+  email based on sender value proposition + persona context. In that case,
+  claims may be empty.
+
+EVIDENCE / CLAIM RULES:
+- For every target-specific factual statement you make, add one claim with the
+  exact observation_id(s) that support it.
+- Claim `text` should be a concise sentence or clause that appears in the body,
+  or is a very close substring of a sentence in the body.
+- Use only observation_ids from the retrieved observations. Never invent ids.
+- Do not cite sender-side value proposition statements as claims; claims are
+  for target-specific facts only.
+- Never say the target "needs", "wants", "is looking for", "is struggling with",
+  or "is prioritizing" something unless a retrieved observation says that.
 """
 
 
@@ -130,21 +129,11 @@ def _format_icp(icp: ICP) -> str:
     )
 
 
-def _format_obs_for_picker(obs: list[Observation]) -> str:
+def _format_obs_for_writer(obs: list[Observation]) -> str:
     return "\n".join(
         f"- {o.observation_id} [{o.kind}, conf={o.confidence:.2f}]: {o.text}"
         for o in obs
     ) or "(none)"
-
-
-def _format_obs_for_writer(picked_ids: list[str], obs_by_id: dict[str, Observation]) -> str:
-    lines = []
-    for oid in picked_ids:
-        o = obs_by_id.get(oid)
-        if not o:
-            continue
-        lines.append(f"- {o.observation_id} [{o.kind}]: {o.text}")
-    return "\n".join(lines) or "(none)"
 
 
 def _persona_block(strategy: StrategyArtifact, persona: PersonaInput) -> str:
@@ -158,81 +147,121 @@ def _persona_block(strategy: StrategyArtifact, persona: PersonaInput) -> str:
     )
 
 
-def _pick_facts(
-    *,
-    target_observations: list[Observation],
-    strategy: StrategyArtifact,
-    llm: LLMClient,
-    usage: UsageAccumulator,
-) -> _PickedFacts | None:
-    """Pass A: pick observation_ids for each angle."""
-    angle_hypos = "\n".join(
-        f"- {a.type.value}: {a.hypothesis}" for a in strategy.strategy.angles
+def _format_angle(angle: Angle) -> str:
+    return (
+        f"type: {angle.type.value}\n"
+        f"hypothesis: {angle.hypothesis}\n"
+        f"evidence_refs_from_strategy: {angle.evidence_refs}"
     )
-    user = (
-        "TARGET OBSERVATIONS:\n"
-        + _format_obs_for_picker(target_observations)
-        + "\n\nSTRATEGY HYPOTHESES:\n"
-        + angle_hypos
-        + "\n\nPick 2-3 observation_ids per angle. Return JSON now."
-    )
-    try:
-        return llm.structured(
-            system=_PICKER_SYSTEM,
-            user=user,
-            schema=_PickedFacts,
-            purpose="writer_pick_facts",
-            usage=usage,
-            temperature=0.0,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("writer pick_facts failed: %s", e)
-        return None
 
 
-def _write_emails_with_picks(
+def _angles_for_writer(strategy: StrategyArtifact) -> list[Angle]:
+    """Return at least two angles, with fallbacks so writing never stops."""
+    angles = list(strategy.strategy.angles)
+    seen = {angle.type for angle in angles}
+    fallbacks = [
+        Angle(
+            type=AngleType.PAIN_LED,
+            hypothesis=(
+                "Write a conservative exploratory email that connects the "
+                "sender value proposition to a possible business challenge for "
+                "this persona without claiming a confirmed pain."
+            ),
+            evidence_refs=[],
+        ),
+        Angle(
+            type=AngleType.TRIGGER_LED,
+            hypothesis=(
+                "Write a conservative exploratory email using any retrieved "
+                "target signal if available; otherwise keep the trigger broad "
+                "and avoid inventing urgency."
+            ),
+            evidence_refs=[],
+        ),
+    ]
+    for fallback in fallbacks:
+        if fallback.type not in seen:
+            angles.append(fallback)
+            seen.add(fallback.type)
+    return angles[:2]
+
+
+def _write_email_for_angle(
     *,
+    angle: Angle,
     sender_vp: ValueProposition,
     sender_icp: ICP,
-    obs_by_id: dict[str, Observation],
-    picks: _PickedFacts,
+    target_observations: list[Observation],
     strategy: StrategyArtifact,
     persona: PersonaInput,
     llm: LLMClient,
     usage: UsageAccumulator,
-) -> _WriterDraft | None:
-    """Pass B: produce both emails using only the picked facts."""
+) -> _EmailDraft | None:
+    """Produce one email for one strategy angle in an independent LLM call."""
     user = (
         "SENDER VALUE PROPOSITION:\n"
+        f"- label:     {sender_vp.label}\n"
         f"- customer:  {sender_vp.customer}\n"
         f"- pain:      {sender_vp.pain}\n"
         f"- outcome:   {sender_vp.outcome}\n"
         f"- mechanism: {sender_vp.mechanism}\n\n"
         f"SENDER ICP (summary): {_format_icp(sender_icp)}\n\n"
-        "PICKED FACTS - PAIN_LED ANGLE:\n"
-        + _format_obs_for_writer(picks.pain_led.observation_ids, obs_by_id)
-        + "\n\nPICKED FACTS - TRIGGER_LED ANGLE:\n"
-        + _format_obs_for_writer(picks.trigger_led.observation_ids, obs_by_id)
+        "STRATEGY ANGLE FOR THIS EMAIL:\n"
+        + _format_angle(angle)
+        + "\n\nRETRIEVED TARGET OBSERVATIONS:\n"
+        + _format_obs_for_writer(target_observations)
         + "\n\nFIT ASSESSMENT: "
         + strategy.fit_assessment.level.value
         + " | contact_decision: "
         + strategy.strategy.contact_decision.value
+        + "\nSELECTED VP REASON: "
+        + (strategy.selection_reason or "")
+        + "\nMESSAGING ANGLE: "
+        + (strategy.messaging_angle or "")
         + "\n\nPERSONA:\n"
         + _persona_block(strategy, persona)
-        + "\nReturn the JSON with both emails now."
+        + "\nReturn the JSON for this one email now."
     )
     try:
         return llm.structured(
             system=_WRITER_SYSTEM,
             user=user,
-            schema=_WriterDraft,
-            purpose="writer_write_emails",
+            schema=_EmailDraft,
+            purpose=f"writer_write_email_{angle.type.value}",
             usage=usage,
-            temperature=0.4,
+            model=settings.writer_llm_model or None,
+            temperature=settings.writer_llm_temperature,
         )
     except Exception as e:  # noqa: BLE001
-        log.warning("writer write_emails failed: %s", e)
+        log.warning("writer write_email angle=%s failed: %s", angle.type.value, e)
         return None
+
+
+def _fallback_email_draft(
+    *,
+    angle: Angle,
+    sender_vp: ValueProposition,
+    persona: PersonaInput,
+) -> _EmailDraft:
+    """Last-resort email when the writer model fails.
+
+    Keeps the promise that the product always returns an email while avoiding
+    any target-specific claims that would require evidence.
+    """
+    outcome = sender_vp.outcome.strip() or "improve business outcomes"
+    mechanism = sender_vp.mechanism.strip() or "the team's approach"
+    customer = sender_vp.customer.strip() or "teams"
+    label = sender_vp.label.strip() or "your work"
+    subject = f"Exploring {label}"
+    body = (
+        f"I wanted to reach out because your role as {persona.role} may touch "
+        f"areas where {customer} evaluate ways to {outcome}.\n\n"
+        f"The reason I thought it could be relevant is that {mechanism}. I do "
+        "not want to assume this is a current priority on your side, but it "
+        "may be worth comparing notes if this area is on the roadmap.\n\n"
+        "Would a short conversation be useful?"
+    )
+    return _EmailDraft(subject=subject, body=body, claims=[])
 
 
 def write_emails(
@@ -245,53 +274,29 @@ def write_emails(
     llm: LLMClient,
     usage: UsageAccumulator,
 ) -> list[Email]:
-    # Defensive refusal: if there are no observations to cite, do NOT
-    # generate a generic, ungrounded email.
-    if not target_observations:
-        log.info("write_emails: no target observations -> skipping email generation")
-        return []
-
     valid_obs_ids: set[str] = {o.observation_id for o in target_observations}
     obs_lookup: dict[str, Observation] = {
         o.observation_id: o for o in target_observations
     }
 
-    picks = _pick_facts(
-        target_observations=target_observations,
-        strategy=strategy,
-        llm=llm,
-        usage=usage,
-    )
-    if picks is None:
-        return []
-
-    # Drop hallucinated observation_ids before pass B sees them.
-    valid_pain = [oid for oid in picks.pain_led.observation_ids if oid in valid_obs_ids]
-    valid_trig = [oid for oid in picks.trigger_led.observation_ids if oid in valid_obs_ids]
-    if not valid_pain or not valid_trig:
-        log.warning(
-            "write_emails: picker returned no valid ids (pain=%d, trigger=%d) -> skipping",
-            len(valid_pain),
-            len(valid_trig),
-        )
-        return []
-    picks.pain_led.observation_ids = valid_pain
-    picks.trigger_led.observation_ids = valid_trig
-
-    draft = _write_emails_with_picks(
-        sender_vp=sender_vp,
-        sender_icp=sender_icp,
-        obs_by_id=obs_lookup,
-        picks=picks,
-        strategy=strategy,
-        persona=persona,
-        llm=llm,
-        usage=usage,
-    )
-    if draft is None:
-        return []
-
-    def build(angle: AngleType, d: _EmailDraft, picked_ids: list[str]) -> Email:
+    def build(angle: Angle, d: _EmailDraft) -> Email | None:
+        if not d.should_write:
+            log.info(
+                "write_emails: overriding model refusal for angle=%s reason=%s",
+                angle.type.value,
+                d.skip_reason[:160],
+            )
+            d = _fallback_email_draft(
+                angle=angle, sender_vp=sender_vp, persona=persona
+            )
+        if not d.subject.strip() or not d.body.strip():
+            log.info(
+                "write_emails: using fallback for angle=%s because subject/body was empty",
+                angle.type.value,
+            )
+            d = _fallback_email_draft(
+                angle=angle, sender_vp=sender_vp, persona=persona
+            )
         email_id = f"email_{uuid.uuid4().hex[:10]}"
         claims: list[EmailClaim] = []
         for c in d.claims:
@@ -308,18 +313,13 @@ def write_emails(
                 )
             )
 
-        # Safety net: if the model emitted a body but no valid claims, fall
-        # back to one claim per picked fact whose text demonstrably appears
-        # in the body. We take the longest leading prefix of the
-        # observation text (in 10-char steps) that survives in the body.
-        # Without this, a sloppy LLM response would zero out every claim
-        # and trigger the "Claims (0)" UI complaint.
+        # Safety net: if the model wrote target-specific prose but forgot valid
+        # claims, recover only when an observation text visibly appears in the
+        # body. If nothing matches, still keep the email: the prompt allows a
+        # broader sender/persona-based note with zero target-specific claims.
         if not claims:
             body_l = d.body.lower()
-            for oid in picked_ids:
-                obs = obs_lookup.get(oid)
-                if not obs:
-                    continue
+            for obs in obs_lookup.values():
                 obs_l = obs.text.lower().strip()
                 prefix = ""
                 for cut in range(min(len(obs_l), 80), 19, -10):
@@ -332,22 +332,37 @@ def write_emails(
                         EmailClaim(
                             claim_id=f"claim_{uuid.uuid4().hex[:10]}",
                             text=prefix,
-                            evidence_refs=[oid],
+                            evidence_refs=[obs.observation_id],
                             status=ClaimStatus.UNSUPPORTED,
                         )
                     )
 
         return Email(
             email_id=email_id,
-            angle=angle,
+            angle=angle.type,
             subject=d.subject.strip(),
             body=d.body.strip(),
             claims=claims,
         )
 
-    return [
-        build(AngleType.PAIN_LED, draft.pain_led, picks.pain_led.observation_ids),
-        build(
-            AngleType.TRIGGER_LED, draft.trigger_led, picks.trigger_led.observation_ids
-        ),
-    ]
+    angles = _angles_for_writer(strategy)
+    out: list[Email] = []
+    for angle in angles:
+        draft = _write_email_for_angle(
+            angle=angle,
+            sender_vp=sender_vp,
+            sender_icp=sender_icp,
+            target_observations=target_observations,
+            strategy=strategy,
+            persona=persona,
+            llm=llm,
+            usage=usage,
+        )
+        if draft is None:
+            draft = _fallback_email_draft(
+                angle=angle, sender_vp=sender_vp, persona=persona
+            )
+        email = build(angle, draft)
+        if email:
+            out.append(email)
+    return out

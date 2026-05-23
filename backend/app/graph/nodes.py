@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import threading
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -40,6 +41,7 @@ from ..synthesis import (
     overlap as overlap_mod,
     sender as sender_synth,
     strategy as strategy_synth,
+    value_props_store,
     verify as verify_mod,
     writer as writer_mod,
 )
@@ -245,7 +247,9 @@ def _normalize(homepage: str, path: str) -> str:
 # ---------- Extract / validate ----------
 
 
-def make_extract_node(*, llm: LLMClient, task: str) -> Callable[[FlowState], dict]:
+def make_extract_node(
+    *, llm: LLMClient, nli: NliValidator, task: str
+) -> Callable[[FlowState], dict]:
     async def node(state: FlowState) -> dict:
         tracker = state["tracker"]
         usage = state["usage"]
@@ -260,8 +264,30 @@ def make_extract_node(*, llm: LLMClient, task: str) -> Callable[[FlowState], dic
         with tracker.stage("extract") as st:
             _emit(state, "extract", {"sections": len(new_sections)})
 
-            def _on_batch(done: int, total: int) -> None:
-                _emit(state, "extract_progress", {"done": done, "total": total})
+            # Overlap NLI validation with remaining LLM batches: while later
+            # batches extract, earlier batches can validate on CPU.
+            nli_lock = threading.Lock()
+            validate_tasks: list[asyncio.Task[list[Observation]]] = []
+
+            def _validate_batch_sync(batch_obs: list[Observation]) -> list[Observation]:
+                with nli_lock:
+                    validated, _ = validate.validate_observations(
+                        batch_obs, sections_by_id, nli=nli
+                    )
+                return validated
+
+            def _on_batch(batch_obs: list[Observation], done: int, total: int) -> None:
+                _emit(
+                    state,
+                    "extract_progress",
+                    {"done": done, "total": total, "observations": len(batch_obs)},
+                )
+                if batch_obs:
+                    validate_tasks.append(
+                        asyncio.create_task(
+                            asyncio.to_thread(_validate_batch_sync, batch_obs)
+                        )
+                    )
 
             new_obs = await extract.extract_observations(
                 new_sections,
@@ -269,8 +295,27 @@ def make_extract_node(*, llm: LLMClient, task: str) -> Callable[[FlowState], dic
                 llm=llm,
                 usage=usage,
                 task="sender" if task == "sender" else "target",
-                on_batch_done=_on_batch,
+                on_batch_observations=_on_batch,
             )
+
+            if validate_tasks:
+                batch_results = await asyncio.gather(*validate_tasks)
+                validated_by_id = {
+                    o.observation_id: o
+                    for batch in batch_results
+                    for o in batch
+                }
+                new_obs = [
+                    validated_by_id.get(o.observation_id, o) for o in new_obs
+                ]
+
+            # Persist as soon as observations are extracted + inline-validated.
+            # The downstream validate_node only runs NLI on the leftover
+            # un-validated tail, so if we waited for it the (typical) case
+            # where every observation was already validated here would silently
+            # never write anything to the DB -- breaking later evidence lookups.
+            _persist_observations(new_obs)
+
             st.detail["observations"] = len(new_obs)
             tracker.metrics.observations_extracted += len(new_obs)
             _emit(state, "extract_done", {"observations": len(new_obs)})
@@ -327,8 +372,13 @@ def make_validate_node(*, nli: NliValidator) -> Callable[[FlowState], dict]:
             st.detail.update(counts)
             _emit(state, "validate_done", counts)
 
-        _persist_observations(validated)
         merged = already + validated
+        # Persist the full set (already + newly validated). INSERT OR REPLACE
+        # is idempotent, so re-persisting `already` is cheap and guarantees
+        # every validated observation is in the DB for later evidence lookups
+        # even if `to_validate` was empty (the common case when the extract
+        # node already inline-validated everything).
+        _persist_observations(merged)
 
         # Update evidence-chars metric.
         evidence_chars = sum(
@@ -355,17 +405,71 @@ def make_sender_synthesize_node(*, llm: LLMClient) -> Callable[[FlowState], dict
         observations = state.get("observations") or []
         usable = validate.filter_for_synthesis(observations)
 
-        with tracker.stage("synthesize_icp"):
-            _emit(state, "icp", {})
-            icp = sender_synth.synthesize_icp(usable, llm=llm, usage=usage)
+        _emit(
+            state,
+            "synthesis",
+            {
+                "message": f"Evaluating {len(usable)} extracted observations…",
+                "step": "evaluate",
+                "usable": len(usable),
+            },
+        )
 
-        with tracker.stage("synthesize_vp"):
-            _emit(state, "vp", {})
-            vp = sender_synth.synthesize_value_proposition(
-                usable, llm=llm, usage=usage
+        _emit(
+            state,
+            "synthesis_progress",
+            {"message": "Synthesizing ICP…", "step": "icp"},
+        )
+        _emit(state, "icp", {"message": "Synthesizing ICP…"})
+
+        _emit(
+            state,
+            "synthesis_progress",
+            {"message": "Synthesizing value proposition(s)…", "step": "vp"},
+        )
+        _emit(state, "vp", {"message": "Synthesizing value proposition(s)…"})
+
+        icp_task = asyncio.create_task(
+            asyncio.to_thread(
+                sender_synth.synthesize_icp, usable, llm=llm, usage=usage
             )
+        )
+        vps_task = asyncio.create_task(
+            asyncio.to_thread(
+                sender_synth.synthesize_value_propositions,
+                usable,
+                llm=llm,
+                usage=usage,
+            )
+        )
+        icp, value_propositions = await asyncio.gather(icp_task, vps_task)
+
+        _emit(
+            state,
+            "synthesis_progress",
+            {
+                "message": "Preparing recommendation summary…",
+                "step": "summary",
+                "value_propositions": len(value_propositions),
+            },
+        )
+
+        vp = value_props_store.primary_value_proposition(value_propositions)
+
+        _emit(
+            state,
+            "synthesis_progress",
+            {"message": "Finalizing synthesis…", "step": "finalize"},
+        )
+        _emit(state, "icp_done", {"fields": 5})
+        _emit(
+            state,
+            "vp_done",
+            {"count": len(value_propositions), "primary": vp.label or "Primary"},
+        )
 
         # Persist
+        vp_payload = value_props_store.serialize_value_props(value_propositions)
         with tx() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO icps (company_id, payload) VALUES (?, ?)",
@@ -373,16 +477,20 @@ def make_sender_synthesize_node(*, llm: LLMClient) -> Callable[[FlowState], dict
             )
             conn.execute(
                 "INSERT OR REPLACE INTO value_props (company_id, payload) VALUES (?, ?)",
-                (state["company_id"], dumps(vp.model_dump(mode="json"))),
+                (state["company_id"], dumps(vp_payload)),
             )
 
         tracker.log_artifact_json("icp.json", icp.model_dump(mode="json"))
-        tracker.log_artifact_json("value_proposition.json", vp.model_dump(mode="json"))
+        tracker.log_artifact_json("value_propositions.json", vp_payload)
         tracker.log_artifact_json(
             "observations.json",
             [o.model_dump(mode="json") for o in observations],
         )
-        return {"icp": icp, "value_proposition": vp}
+        return {
+            "icp": icp,
+            "value_proposition": vp,
+            "value_propositions": value_propositions,
+        }
 
     return node
 
@@ -536,10 +644,20 @@ def make_external_enrich_node(
 
         with tracker.stage("web_search") as st:
             _emit(state, "web_search", {"queries": queries, "provider": provider.name})
+            search_queries = queries[:3]
+
+            async def _search_one(q: str) -> list[dict]:
+                hits = await asyncio.to_thread(
+                    provider.search, q, settings.external_signal_max_results
+                )
+                return hits_to_sections(hits, company_id)
+
+            search_results = await asyncio.gather(
+                *[_search_one(q) for q in search_queries]
+            )
             ws_sections: list[dict] = []
-            for q in queries[:3]:
-                hits = provider.search(q, settings.external_signal_max_results)
-                ws_sections.extend(hits_to_sections(hits, company_id))
+            for batch in search_results:
+                ws_sections.extend(batch)
             st.detail["sections"] = len(ws_sections)
             _emit(state, "web_search_done",
                   {"sections": len(ws_sections), "provider": provider.name})
@@ -554,8 +672,33 @@ def make_external_enrich_node(
 
         _emit(state, "extract_ws", {"sections": len(ws_sections)})
 
-        def _on_ws_batch(done: int, total: int) -> None:
-            _emit(state, "extract_progress", {"done": done, "total": total, "scope": "web_search"})
+        nli_lock = threading.Lock()
+        validate_tasks: list[asyncio.Task[list[Observation]]] = []
+
+        def _validate_ws_batch(batch_obs: list[Observation]) -> list[Observation]:
+            with nli_lock:
+                validated, _ = validate.validate_observations(
+                    batch_obs, sections_by_id, nli=nli
+                )
+            return validated
+
+        def _on_ws_batch(batch_obs: list[Observation], done: int, total: int) -> None:
+            _emit(
+                state,
+                "extract_progress",
+                {
+                    "done": done,
+                    "total": total,
+                    "scope": "web_search",
+                    "observations": len(batch_obs),
+                },
+            )
+            if batch_obs:
+                validate_tasks.append(
+                    asyncio.create_task(
+                        asyncio.to_thread(_validate_ws_batch, batch_obs)
+                    )
+                )
 
         new_obs = await extract.extract_observations(
             ws_sections,
@@ -563,19 +706,42 @@ def make_external_enrich_node(
             llm=llm,
             usage=usage,
             task="target",
-            on_batch_done=_on_ws_batch,
+            on_batch_observations=_on_ws_batch,
         )
-        validated, counts = validate.validate_observations(
-            new_obs, sections_by_id, nli=nli
-        )
-        _persist_observations(validated)
+        if validate_tasks:
+            batch_results = await asyncio.gather(*validate_tasks)
+            validated_by_id = {
+                o.observation_id: o
+                for batch in batch_results
+                for o in batch
+            }
+            new_obs = [validated_by_id.get(o.observation_id, o) for o in new_obs]
+        remaining = [o for o in new_obs if o.validation is None]
+        if remaining:
+            extra_validated, counts = validate.validate_observations(
+                remaining, sections_by_id, nli=nli
+            )
+            extra_by_id = {o.observation_id: o for o in extra_validated}
+            new_obs = [extra_by_id.get(o.observation_id, o) for o in new_obs]
+        else:
+            counts = {
+                "entailed": sum(
+                    1 for o in new_obs if o.validation and o.validation.value == "entailed"
+                ),
+                "contradicted": sum(
+                    1
+                    for o in new_obs
+                    if o.validation and o.validation.value == "contradicted"
+                ),
+            }
+        _persist_observations(new_obs)
         tracker.metrics.observations_extracted += len(new_obs)
         tracker.metrics.observations_validated += counts.get("entailed", 0)
         tracker.metrics.observations_rejected += counts.get("contradicted", 0)
 
         return {
             "sections_by_id": sections_by_id,
-            "observations": (state.get("observations") or []) + validated,
+            "observations": (state.get("observations") or []) + new_obs,
             "web_search_done": True,
         }
 
@@ -592,15 +758,18 @@ def make_strategy_node(*, llm: LLMClient) -> Callable[[FlowState], dict]:
         observations = state.get("observations") or []
         usable = validate.filter_for_synthesis(observations)
         sender_icp = state.get("sender_icp")
+        sender_vps = state.get("sender_vps") or []
         sender_vp = state.get("sender_vp")
         persona = state.get("persona")
         assert sender_icp and sender_vp and persona, "target flow requires sender artifacts + persona"
+        if not sender_vps:
+            sender_vps = [sender_vp]
 
         with tracker.stage("strategy"):
             _emit(state, "strategy", {"observations": len(usable)})
             strategy = strategy_synth.synthesize_strategy(
                 sender_icp=sender_icp,
-                sender_vp=sender_vp,
+                sender_vps=sender_vps,
                 target_observations=usable,
                 persona=persona,
                 llm=llm,
@@ -613,7 +782,16 @@ def make_strategy_node(*, llm: LLMClient) -> Callable[[FlowState], dict]:
                     "fit_level": strategy.fit_assessment.level.value,
                     "contact_decision": strategy.strategy.contact_decision.value,
                     "angles": len(strategy.strategy.angles),
+                    "selected_vp_id": strategy.selected_value_proposition_id,
+                    "selected_vp_label": strategy.selected_value_proposition_label,
                 },
+            )
+            log.info(
+                "strategy_done: vp_id=%r label=%r fit=%s decision=%s",
+                strategy.selected_value_proposition_id,
+                strategy.selected_value_proposition_label,
+                strategy.fit_assessment.level.value,
+                strategy.strategy.contact_decision.value,
             )
         tracker.log_artifact_json("strategy.json", strategy.model_dump(mode="json"))
         return {"strategy": strategy}
@@ -628,10 +806,38 @@ def make_writer_node(*, llm: LLMClient) -> Callable[[FlowState], dict]:
         observations = state.get("observations") or []
         usable = validate.filter_for_synthesis(observations)
         sender_icp = state["sender_icp"]
+        sender_vps = state.get("sender_vps") or []
         sender_vp = state["sender_vp"]
         strategy = state["strategy"]
         persona = state["persona"]
         assert sender_icp and sender_vp and strategy and persona
+
+        # Safeguard: emails MUST be driven by the VP the strategy selected.
+        # If the strategy did not select one (only legal when the sender has a
+        # single VP), keep the primary. Otherwise resolve explicitly.
+        if sender_vps:
+            if not strategy.selected_value_proposition_id:
+                log.warning(
+                    "writer: strategy has no selected_value_proposition_id; "
+                    "using primary VP (%r) as fallback",
+                    sender_vp.id,
+                )
+            else:
+                resolved = value_props_store.resolve_value_proposition(
+                    sender_vps, strategy.selected_value_proposition_id
+                )
+                if resolved.id != strategy.selected_value_proposition_id:
+                    log.warning(
+                        "writer: selected vp_id=%r not found in sender_vps; "
+                        "falling back to primary",
+                        strategy.selected_value_proposition_id,
+                    )
+                sender_vp = resolved
+                log.info(
+                    "writer: using vp_id=%r label=%r for emails",
+                    sender_vp.id,
+                    sender_vp.label,
+                )
 
         with tracker.stage("write_emails"):
             _emit(state, "write_emails", {"angles": ["pain_led", "trigger_led"]})

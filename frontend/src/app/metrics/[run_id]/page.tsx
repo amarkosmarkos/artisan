@@ -14,6 +14,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { StageDetailView } from "@/components/stage-detail-view";
 import {
   getCompanyObservations,
   getCompanySources,
@@ -58,7 +59,7 @@ export default function RunDetailPage() {
     <div className="space-y-6">
       <Button variant="ghost" size="sm" asChild>
         <Link href="/metrics">
-          <ArrowLeft className="h-4 w-4" /> All runs
+          <ArrowLeft className="h-4 w-4" /> Admin
         </Link>
       </Button>
 
@@ -347,9 +348,7 @@ function StagesTimeline({ stages }: { stages: RunMetrics["stages"] }) {
               />
             </div>
             {s.detail && Object.keys(s.detail).length > 0 && (
-              <pre className="mt-2 max-h-40 overflow-auto rounded bg-muted/40 p-2 text-[11px] leading-snug font-mono">
-                {JSON.stringify(s.detail, null, 2)}
-              </pre>
+              <StageDetailView detail={s.detail} />
             )}
           </li>
         );
@@ -374,11 +373,22 @@ function PlannerDecisions({
     <ul className="space-y-3">
       {decisions.map((d, i) => (
         <li key={i} className="rounded-md border border-border/60 p-3">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Badge variant="outline" className="capitalize">
               {d.task}
             </Badge>
-            <Badge variant="outline">{d.decision}</Badge>
+            <Badge
+              variant={
+                d.decision === "continue" ||
+                d.decision === "proceed_low_confidence"
+                  ? "sender"
+                  : d.decision === "stop"
+                    ? "destructive"
+                    : "outline"
+              }
+            >
+              {d.decision.replace(/_/g, " ")}
+            </Badge>
           </div>
           {d.reason && (
             <p className="mt-2 text-sm text-foreground/90 leading-snug">
@@ -386,20 +396,47 @@ function PlannerDecisions({
             </p>
           )}
           {d.missing_fields && d.missing_fields.length > 0 && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              Missing: {d.missing_fields.join(", ")}
-            </p>
+            <div className="mt-2">
+              <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Missing fields
+              </p>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {d.missing_fields.map((f) => (
+                  <Badge key={f} variant="outline" className="font-normal">
+                    {f}
+                  </Badge>
+                ))}
+              </div>
+            </div>
           )}
           {d.suggested_internal_pages &&
             d.suggested_internal_pages.length > 0 && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                Pages: {d.suggested_internal_pages.join(", ")}
-              </p>
+              <div className="mt-2">
+                <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Suggested pages
+                </p>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {d.suggested_internal_pages.map((p) => (
+                    <Badge key={p} variant="outline" className="font-mono font-normal text-xs">
+                      {p}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
             )}
           {d.suggested_queries && d.suggested_queries.length > 0 && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              Queries: {d.suggested_queries.join(", ")}
-            </p>
+            <div className="mt-2">
+              <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Suggested queries
+              </p>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {d.suggested_queries.map((q) => (
+                  <Badge key={q} variant="outline" className="font-normal">
+                    {q}
+                  </Badge>
+                ))}
+              </div>
+            </div>
           )}
         </li>
       ))}
