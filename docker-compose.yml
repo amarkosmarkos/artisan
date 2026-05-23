@@ -1,0 +1,59 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    image: artisan-backend:dev
+    container_name: artisan-backend
+    env_file:
+      - .env
+    environment:
+      CORS_ORIGINS: http://localhost:3000
+      DATA_DIR: /data
+      DB_PATH: /data/artisan.db
+      CRAWL_CACHE_DIR: /data/crawl
+      MLFLOW_TRACKING_URI: file:/data/mlruns
+    volumes:
+      # Bind-mount to host so SQLite + MLflow + crawl cache survive
+      # `docker compose down -v` and are visible/portable on the host fs.
+      - ./data:/data
+      - hf_cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health').read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  frontend:
+    build:
+      context: ./frontend
+    image: artisan-frontend:dev
+    container_name: artisan-frontend
+    environment:
+      # Read at request time by the /api/v1/[...path] route handler proxy.
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.2
+    container_name: artisan-mlflow
+    command: >
+      mlflow ui
+      --backend-store-uri file:/data/mlruns
+      --host 0.0.0.0
+      --port 5000
+    volumes:
+      - ./data:/data
+    ports:
+      - "5000:5000"
+    depends_on:
+      - backend
+
+volumes:
+  hf_cache:

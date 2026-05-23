@@ -1,0 +1,32 @@
+# --- API ---
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+sse-starlette==2.1.3
+
+# --- Orchestration + structured LLM I/O ---
+langgraph==0.2.50
+instructor==1.6.4
+# openai 1.55 fixed the legacy `proxies=` kwarg, so we no longer need to pin
+# httpx<0.28 against the older Azure client.
+openai==1.57.0
+httpx==0.27.2
+
+# --- Crawling (lean stack, no LLM transitive deps) ---
+# trafilatura is the canonical "html -> readable markdown" extractor.
+# selectolax is a CPython-native parser used only for cheap link discovery.
+# playwright is optional fallback for JS-rendered pages; pinned to match
+# the browser binaries shipped in the base image (mcr.../playwright:v1.60.0).
+trafilatura==1.12.2
+selectolax==0.3.27
+playwright==1.60.0
+
+# --- Validation ---
+sentence-transformers==3.2.1
+
+# --- Observability + utils ---
+mlflow-skinny==2.17.2
+pydantic==2.10.6
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+numpy==1.26.4
+tenacity==9.0.0

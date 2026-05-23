@@ -1,0 +1,280 @@
+"""Pydantic schemas and enums for the evidence pipeline.
+
+These are the value spaces of the system: every commercial decision flows
+through one of these typed objects. The LLM is *never* the source of truth
+for citations: it only references deterministic ``section_id`` values that
+the backend created and persisted.
+"""
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+
+# ---------- Enums ----------
+
+class FitLevel(str, Enum):
+    STRONG = "strong"
+    PLAUSIBLE = "plausible"
+    WEAK = "weak"
+    NONE = "none"
+
+
+class ContactDecision(str, Enum):
+    CONTACT = "contact"
+    WAIT_FOR_TRIGGER = "wait_for_trigger"
+    SKIP = "skip"
+
+
+class ClaimStatus(str, Enum):
+    ENTAILED = "entailed"
+    NEUTRAL = "neutral"
+    CONTRADICTED = "contradicted"
+    UNSUPPORTED = "unsupported"
+    REPAIRED = "repaired"
+
+
+class AngleType(str, Enum):
+    PAIN_LED = "pain_led"
+    TRIGGER_LED = "trigger_led"
+    OUTCOME_LED = "outcome_led"
+
+
+class PlannerDecision(str, Enum):
+    CONTINUE = "continue"
+    FETCH_MORE = "fetch_more"
+    WEB_SEARCH = "web_search"
+    PROCEED_LOW_CONFIDENCE = "proceed_low_confidence"
+    STOP = "stop"
+
+
+class Seniority(str, Enum):
+    IC = "ic"
+    MANAGER = "manager"
+    DIRECTOR = "director"
+    VP = "vp"
+    C_LEVEL = "c_level"
+    FOUNDER = "founder"
+
+
+class NliLabel(str, Enum):
+    ENTAILED = "entailed"
+    NEUTRAL = "neutral"
+    CONTRADICTED = "contradicted"
+
+
+# ---------- Evidence primitives ----------
+
+class SectionRef(BaseModel):
+    section_id: str
+    url: str
+    heading: str | None = None
+
+
+class Section(BaseModel):
+    section_id: str
+    company_id: str
+    url: str
+    heading: str | None = None
+    text: str
+    char_start: int | None = None
+    char_end: int | None = None
+    source: Literal["website", "web_search"] = "website"
+
+
+class Observation(BaseModel):
+    observation_id: str
+    company_id: str
+    kind: str  # e.g. "industry", "customer", "trigger", "pricing", "hiring"
+    text: str
+    section_id: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    validation: NliLabel | None = None
+    validation_score: float | None = None
+
+
+# ---------- Sender artifacts ----------
+
+class FieldWithEvidence(BaseModel):
+    """A structured field whose value is grounded in observation evidence."""
+    values: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence_refs: list[str] = Field(default_factory=list)  # observation_id list
+
+
+class ICP(BaseModel):
+    target_industries: FieldWithEvidence = Field(default_factory=FieldWithEvidence)
+    size_bands: FieldWithEvidence = Field(default_factory=FieldWithEvidence)
+    likely_buyers: FieldWithEvidence = Field(default_factory=FieldWithEvidence)
+    common_triggers: FieldWithEvidence = Field(default_factory=FieldWithEvidence)
+    negative_icp: FieldWithEvidence = Field(default_factory=FieldWithEvidence)
+
+
+class ValueProposition(BaseModel):
+    customer: str = ""
+    pain: str = ""
+    outcome: str = ""
+    mechanism: str = ""
+    confidence: float = 0.0
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+# ---------- Planner ----------
+
+class PlannerInput(BaseModel):
+    task: Literal["sender_icp", "target_eval"]
+    observations: list[Observation]
+    missing_fields: list[str]
+    evidence_counts: dict[str, int]
+    field_confidence: dict[str, float]
+    failed_sources: list[str] = Field(default_factory=list)
+    # Real internal links discovered during crawl but not yet fetched.
+    # The planner MUST pick from this list for fetch_more (no invented paths).
+    uncrawled_discovered_urls: list[str] = Field(default_factory=list)
+
+
+class PlannerOutput(BaseModel):
+    decision: PlannerDecision
+    reason: str
+    missing_fields: list[str] = Field(default_factory=list)
+    suggested_queries: list[str] = Field(default_factory=list)
+    suggested_internal_pages: list[str] = Field(default_factory=list)
+
+
+# ---------- Strategy artifact ----------
+
+class FitAssessment(BaseModel):
+    level: FitLevel
+    reasons: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+
+
+class PersonaAlignment(BaseModel):
+    role_relevance: Literal["high", "medium", "low"]
+    role_relevance_reason: str = ""
+    preferred_framing: str
+    preferred_framing_reason: str = ""
+    avoid: list[str] = Field(default_factory=list)
+    avoid_reason: str = ""
+
+
+class Angle(BaseModel):
+    type: AngleType
+    hypothesis: str
+    evidence_refs: list[str] = Field(default_factory=list)  # observation_ids
+
+
+class Strategy(BaseModel):
+    contact_decision: ContactDecision
+    angles: list[Angle]
+    persona_alignment: PersonaAlignment
+
+
+class StrategyArtifact(BaseModel):
+    fit_assessment: FitAssessment
+    strategy: Strategy
+
+
+# ---------- Email + claims ----------
+
+class EmailClaim(BaseModel):
+    claim_id: str
+    text: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    status: ClaimStatus = ClaimStatus.UNSUPPORTED
+    nli_score: float | None = None
+    repaired_text: str | None = None
+
+
+class Email(BaseModel):
+    email_id: str
+    angle: AngleType
+    subject: str
+    body: str
+    claims: list[EmailClaim] = Field(default_factory=list)
+
+
+class ClaimMapEntry(BaseModel):
+    claim_id: str
+    email_id: str
+    angle: AngleType
+    text: str
+    status: ClaimStatus
+    nli_score: float | None = None
+    citations: list[dict[str, str]] = Field(default_factory=list)  # url + snippet
+
+
+# ---------- Persona input ----------
+
+class PersonaInput(BaseModel):
+    role: str
+    seniority: Seniority
+
+
+# ---------- Run summary ----------
+
+class RunMetrics(BaseModel):
+    latency_ms: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+    pages_fetched: int = 0
+    sections_created: int = 0
+    observations_extracted: int = 0
+    observations_validated: int = 0
+    observations_rejected: int = 0
+    compression_ratio: float = 0.0
+    raw_cleaned_chars: int = 0
+    evidence_chars_used: int = 0
+    claims_total: int = 0
+    claims_supported: int = 0
+    claims_unsupported: int = 0
+    claims_contradicted: int = 0
+    claims_repaired: int = 0
+    angle_overlap: float | None = None
+    claim_support_rate: float | None = None
+    unsupported_claim_rate: float | None = None
+    observation_validation_rate: float | None = None
+    planner_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    stages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ---------- API request/response ----------
+
+class SenderRequest(BaseModel):
+    sender_url: str
+
+
+class SenderResponse(BaseModel):
+    company_id: str
+    sender_url: str
+    icp: ICP
+    value_proposition: ValueProposition
+    observations: list[Observation]
+    metrics: RunMetrics
+
+
+class TargetRequest(BaseModel):
+    sender_company_id: str
+    target_url: str
+    persona: PersonaInput
+    # Optional: when present, the run is associated to a stored persona
+    # (so the produced strategy/emails are linked back to that persona row
+    # in the UI). If absent, the inline ``persona`` payload is used and
+    # the run is treated as a one-shot (no DB-side persona link).
+    persona_id: str | None = None
+
+
+class TargetResponse(BaseModel):
+    target_company_id: str
+    target_url: str
+    sender_company_id: str
+    persona: PersonaInput
+    observations: list[Observation]
+    strategy: StrategyArtifact
+    emails: list[Email]
+    claim_map: list[ClaimMapEntry]
+    metrics: RunMetrics
