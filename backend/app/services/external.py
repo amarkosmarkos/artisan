@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 from ..config import settings
 from .llm import LLMClient
+from .web_search import run_web_search
 
 log = logging.getLogger(__name__)
 
@@ -85,42 +86,25 @@ class OpenAIWebSearchProvider:
         self._llm = llm
 
     def search(self, query: str, k: int) -> list[SearchHit]:
-        try:
-            resp = self._llm.raw_openai.responses.create(
-                model=settings.llm_model,
-                tools=[{"type": "web_search"}],
-                input=(
-                    f"Find recent public signals about: {query}. "
-                    f"Focus on news, funding, hiring, expansion, leadership changes, "
-                    f"or product launches. Cite the source URLs."
-                ),
-            )
-        except Exception as e:  # noqa: BLE001
-            log.info("openai web_search failed: %s", e)
+        outcome = run_web_search(
+            input=(
+                f"Find recent public signals about: {query}. "
+                f"Focus on news, funding, hiring, expansion, leadership changes, "
+                f"or product launches. Cite the source URLs."
+            ),
+            tool_choice="auto",
+        )
+        if not outcome.ok:
+            log.warning("openai web_search failed: %s", outcome.error)
             return []
 
         hits: dict[str, SearchHit] = {}
-        for item in getattr(resp, "output", []) or []:
-            if getattr(item, "type", None) != "message":
+        for c in outcome.citations:
+            if not _allowed(c.url) or c.url in hits:
                 continue
-            for content in getattr(item, "content", []) or []:
-                text = getattr(content, "text", "") or ""
-                for ann in getattr(content, "annotations", []) or []:
-                    if getattr(ann, "type", "") != "url_citation":
-                        continue
-                    url = getattr(ann, "url", "") or ""
-                    if not _allowed(url) or url in hits:
-                        continue
-                    start = getattr(ann, "start_index", None) or 0
-                    end = getattr(ann, "end_index", None) or min(len(text), start + 320)
-                    snippet = text[max(0, start - 80) : end + 80].strip()
-                    hits[url] = SearchHit(
-                        url=url,
-                        title=(getattr(ann, "title", "") or "")[:200],
-                        snippet=snippet[:600],
-                    )
-                    if len(hits) >= k:
-                        break
+            hits[c.url] = SearchHit(url=c.url, title=c.title, snippet=c.snippet)
+            if len(hits) >= k:
+                break
         out = list(hits.values())[:k]
         log.info("openai_web_search '%s' -> %d hits", query[:60], len(out))
         return out

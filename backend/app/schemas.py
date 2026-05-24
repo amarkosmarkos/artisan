@@ -29,11 +29,38 @@ class ContactDecision(str, Enum):
 
 
 class ClaimStatus(str, Enum):
+    """Legacy claim-map statuses (pre body-verifier pipeline)."""
+
     ENTAILED = "entailed"
     NEUTRAL = "neutral"
     CONTRADICTED = "contradicted"
     UNSUPPORTED = "unsupported"
     REPAIRED = "repaired"
+
+
+class StatementSupportStatus(str, Enum):
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    CONTRADICTED = "contradicted"
+    NOT_CHECKABLE = "not_checkable"
+    # Sender / value-prop positioning that we cannot verify against sender
+    # context (no sender evidence available or no ref found). This status
+    # NEVER makes the email unsafe — it's an informational outcome only.
+    SENDER_CONTEXT_NOT_VERIFIED = "sender_context_not_verified"
+
+
+class StatementCategory(str, Enum):
+    """How a statement should be treated by the safety guard.
+
+    Only ``TARGET_FACT`` statements can mark an email unsafe. Everything
+    else is informational (sender positioning is the sender's own truth;
+    rhetoric and CTAs carry no factual risk).
+    """
+
+    TARGET_FACT = "target_fact"
+    SENDER_OR_VALUE_PROP = "sender_or_value_prop"
+    GENERIC_OR_RHETORICAL = "generic_or_rhetorical"
+    CTA = "cta"
 
 
 class AngleType(str, Enum):
@@ -190,15 +217,37 @@ class StrategyArtifact(BaseModel):
     messaging_angle: str = ""
 
 
-# ---------- Email + claims ----------
+# ---------- Email + safety verification ----------
 
-class EmailClaim(BaseModel):
-    claim_id: str
+
+class StatementContextRef(BaseModel):
+    """A slice of workflow context cited during statement verification."""
+
+    ref_id: str
+    ref_type: str  # observation, section, value_prop, icp, strategy, persona
+    label: str = ""
+    snippet: str = ""
+
+
+class VerifiedStatement(BaseModel):
+    statement_id: str
     text: str
-    evidence_refs: list[str] = Field(default_factory=list)
-    status: ClaimStatus = ClaimStatus.UNSUPPORTED
+    category: StatementCategory = StatementCategory.TARGET_FACT
+    status: StatementSupportStatus = StatementSupportStatus.NOT_CHECKABLE
     nli_score: float | None = None
-    repaired_text: str | None = None
+    context_refs: list[StatementContextRef] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class EmailSafetyReport(BaseModel):
+    statements: list[VerifiedStatement] = Field(default_factory=list)
+    email_regenerated: bool = False
+    regeneration_count: int = 0
+    final_email_safe: bool = True
+    failed_statements: list[str] = Field(default_factory=list)
+    # True only when the verifier LLM actually executed for every statement.
+    # When false, the final email MUST be treated as unsafe (spec item 7).
+    verification_ok: bool = True
 
 
 class Email(BaseModel):
@@ -206,17 +255,20 @@ class Email(BaseModel):
     angle: AngleType
     subject: str
     body: str
-    claims: list[EmailClaim] = Field(default_factory=list)
+    safety: EmailSafetyReport | None = None
 
 
 class ClaimMapEntry(BaseModel):
+    """Flattened statement row for analytics tables and legacy APIs."""
+
     claim_id: str
     email_id: str
     angle: AngleType
     text: str
-    status: ClaimStatus
+    category: StatementCategory = StatementCategory.TARGET_FACT
+    status: StatementSupportStatus
     nli_score: float | None = None
-    citations: list[dict[str, str]] = Field(default_factory=list)  # url + snippet
+    citations: list[dict[str, str]] = Field(default_factory=list)
 
 
 # ---------- Persona input ----------
@@ -224,6 +276,9 @@ class ClaimMapEntry(BaseModel):
 class PersonaInput(BaseModel):
     role: str
     seniority: Seniority
+    # Optional recipient name. When empty, the writer must open with a plain
+    # "Hi," — never a placeholder like "Hi [name]".
+    name: str | None = None
 
 
 # ---------- Run summary ----------
@@ -241,15 +296,26 @@ class RunMetrics(BaseModel):
     compression_ratio: float = 0.0
     raw_cleaned_chars: int = 0
     evidence_chars_used: int = 0
+    extracted_statements_count: int = 0
+    supported_statements_count: int = 0
+    unsupported_statements_count: int = 0
+    contradicted_statements_count: int = 0
+    not_checkable_statements_count: int = 0
+    evidence_support_rate: float | None = None
+    email_regenerated: bool = False
+    regeneration_count: int = 0
+    final_email_safe: bool = True
+    verification_ok: bool = True
+    failed_statements: list[str] = Field(default_factory=list)
+    angle_overlap: float | None = None
+    observation_validation_rate: float | None = None
+    # Legacy aliases (populated from statement metrics for older dashboards).
     claims_total: int = 0
     claims_supported: int = 0
     claims_unsupported: int = 0
     claims_contradicted: int = 0
-    claims_repaired: int = 0
-    angle_overlap: float | None = None
     claim_support_rate: float | None = None
     unsupported_claim_rate: float | None = None
-    observation_validation_rate: float | None = None
     planner_decisions: list[dict[str, Any]] = Field(default_factory=list)
     stages: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -299,3 +365,50 @@ class TargetResponse(BaseModel):
     # All sender value propositions in scope at the time of this run, so the
     # UI can show "alternatives" alongside the selected one.
     sender_value_propositions: list[ValueProposition] = Field(default_factory=list)
+
+
+# ---------- Target discovery (post-sender suggestions) ----------
+
+class DiscoveryEvidence(BaseModel):
+    """A web-search citation used to justify a suggested target."""
+
+    url: str
+    title: str = ""
+    snippet: str = ""
+
+
+class SuggestedPersona(BaseModel):
+    """A role/title hypothesis for outreach. Names are only set when a
+    well-sourced public reference exists; otherwise we keep it role-only.
+    """
+
+    title: str  # role or title, e.g. "VP of Engineering"
+    seniority: Seniority | None = None
+    name: str | None = None  # only when clearly public + well sourced
+    rationale: str = ""
+
+
+class SuggestedTarget(BaseModel):
+    company_name: str
+    domain: str  # canonical apex domain, e.g. "acme.com"
+    homepage_url: str
+    fit_rationale: str  # 1-2 sentences explaining why it fits the ICP/VP
+    matched_value_proposition_id: str | None = None
+    matched_value_proposition_label: str = ""
+    confidence: Literal["high", "medium", "low"] = "medium"
+    evidence: list[DiscoveryEvidence] = Field(default_factory=list)
+    personas: list[SuggestedPersona] = Field(default_factory=list)
+
+
+class SuggestedTargetsResponse(BaseModel):
+    """Result of running OpenAI web search-backed target discovery for a
+    sender. ``status`` distinguishes between healthy results, weak / no
+    matches, and an unavailable provider so the UI can render a clean
+    empty/error state without inferring from an empty list."""
+
+    sender_company_id: str
+    provider: str = ""
+    queries: list[str] = Field(default_factory=list)
+    suggestions: list[SuggestedTarget] = Field(default_factory=list)
+    status: Literal["ok", "weak", "unavailable", "error"] = "ok"
+    message: str = ""

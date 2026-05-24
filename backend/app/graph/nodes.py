@@ -19,10 +19,9 @@ from typing import Callable
 
 from ..config import settings
 from ..db import dumps, tx
-from ..pipeline import crawl, extract, planner, validate
+from ..pipeline import crawl, extract, planner, section_select, validate
 from ..schemas import (
     AngleType,
-    ClaimStatus,
     Email,
     Observation,
     PlannerDecision,
@@ -37,12 +36,11 @@ from ..services.external import (
 from ..services.llm import LLMClient
 from ..services.nli import NliValidator
 from ..synthesis import (
-    claim_extract,
+    email_guard as guard_mod,
     overlap as overlap_mod,
     sender as sender_synth,
     strategy as strategy_synth,
     value_props_store,
-    verify as verify_mod,
     writer as writer_mod,
 )
 from .state import FlowState
@@ -50,9 +48,40 @@ from .state import FlowState
 log = logging.getLogger(__name__)
 
 
-_TARGET_SIGNAL_KINDS = [
-    "industry", "size_band", "hiring", "funding", "expansion", "leadership", "trigger",
-]
+_TARGET_CORE_SIGNAL_KINDS = ["industry", "size_band", "trigger"]
+_TARGET_OPTIONAL_SIGNAL_KINDS = ["hiring", "funding", "expansion", "leadership"]
+_OPTIONAL_SIGNAL_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "hiring": ("hiring", "recruit", "headcount", "talent", "workforce", "open role"),
+    "funding": ("funding", "raise", "investment", "series ", "capital"),
+    "expansion": ("expansion", "expand", "new market", "geographic", "office opening"),
+    "leadership": ("leadership", "executive", "ceo", "cto", "cfo", "appoint"),
+}
+
+
+def _target_context_text(state: FlowState) -> str:
+    parts: list[str] = []
+    vp = state.get("sender_vp")
+    if vp:
+        parts.extend([vp.label, vp.customer, vp.pain, vp.outcome, vp.mechanism])
+    persona = state.get("persona")
+    if persona:
+        parts.append(persona.role)
+    icp = state.get("sender_icp")
+    if icp:
+        for field in (icp.target_industries, icp.likely_buyers, icp.common_triggers):
+            parts.extend(field.values)
+    return " ".join(p for p in parts if p).lower()
+
+
+def _essential_target_signal_kinds(state: FlowState) -> list[str]:
+    """Signal kinds the planner should treat as required for this run."""
+    kinds = list(_TARGET_CORE_SIGNAL_KINDS)
+    blob = _target_context_text(state)
+    for kind in _TARGET_OPTIONAL_SIGNAL_KINDS:
+        keywords = _OPTIONAL_SIGNAL_KEYWORDS.get(kind, ())
+        if any(kw in blob for kw in keywords):
+            kinds.append(kind)
+    return kinds
 
 
 # ---------- Helpers ----------
@@ -155,6 +184,13 @@ def make_crawl_node(*, fetch_more: bool = False) -> Callable[[FlowState], dict]:
         company_id = state["company_id"]
         homepage = state["homepage_url"]
         tracker = state["tracker"]
+        flow_task = state.get("task") or "sender"
+        if flow_task == "target":
+            crawl_pages = settings.target_crawl_max_pages
+            crawl_depth = settings.target_crawl_max_depth
+        else:
+            crawl_pages = settings.crawl_max_pages
+            crawl_depth = settings.crawl_max_depth
         usable_explicit: list[str] | None = None
         if fetch_more:
             planner_out = state.get("planner_output")
@@ -165,7 +201,7 @@ def make_crawl_node(*, fetch_more: bool = False) -> Callable[[FlowState], dict]:
                     crawled=state.get("crawled_urls") or [],
                     planner_suggestions=planner_out.suggested_internal_pages,
                     missing_fields=planner_out.missing_fields,
-                    limit=settings.crawl_max_pages,
+                    limit=settings.fetch_more_max_pages,
                 )
                 if not usable_explicit:
                     log.info(
@@ -182,7 +218,8 @@ def make_crawl_node(*, fetch_more: bool = False) -> Callable[[FlowState], dict]:
             })
             out = await crawl.crawl_company(
                 homepage,
-                max_pages=settings.crawl_max_pages,
+                max_pages=settings.fetch_more_max_pages if fetch_more else crawl_pages,
+                max_depth=crawl_depth,
                 explicit_urls=usable_explicit,
             )
             st.detail["pages"] = len(out.pages)
@@ -261,8 +298,30 @@ def make_extract_node(
         new_sections = [
             s for sid, s in sections_by_id.items() if sid not in already_section_ids
         ]
+        batch_size = settings.extract_batch_size
+        concurrency = settings.extract_concurrency
+        max_sections = (
+            settings.target_max_sections_for_extraction if task == "target" else 0
+        )
+        total_before_cap = len(new_sections)
+        if max_sections > 0 and len(new_sections) > max_sections:
+            new_sections = section_select.select_sections_for_extraction(
+                new_sections,
+                max_sections=max_sections,
+                sender_vp=state.get("sender_vp"),
+                persona=state.get("persona"),
+                sender_icp=state.get("sender_icp"),
+            )
         with tracker.stage("extract") as st:
-            _emit(state, "extract", {"sections": len(new_sections)})
+            _emit(
+                state,
+                "extract",
+                {
+                    "sections": len(new_sections),
+                    "total_sections": total_before_cap,
+                    "capped": total_before_cap > len(new_sections),
+                },
+            )
 
             # Overlap NLI validation with remaining LLM batches: while later
             # batches extract, earlier batches can validate on CPU.
@@ -295,6 +354,8 @@ def make_extract_node(
                 llm=llm,
                 usage=usage,
                 task="sender" if task == "sender" else "target",
+                batch_size=batch_size,
+                concurrency=concurrency,
                 on_batch_observations=_on_batch,
             )
 
@@ -360,19 +421,26 @@ def make_validate_node(*, nli: NliValidator) -> Callable[[FlowState], dict]:
             def _on_chunk(done: int, total: int) -> None:
                 _emit(state, "validate_progress", {"done": done, "total": total})
 
-            validated, counts = await asyncio.to_thread(
-                validate.validate_observations,
-                to_validate,
-                sections_by_id,
-                nli=nli,
-                on_chunk_done=_on_chunk,
-            )
-            tracker.metrics.observations_validated += counts.get("entailed", 0)
-            tracker.metrics.observations_rejected += counts.get("contradicted", 0)
-            st.detail.update(counts)
-            _emit(state, "validate_done", counts)
+            if to_validate:
+                validated, _counts = await asyncio.to_thread(
+                    validate.validate_observations,
+                    to_validate,
+                    sections_by_id,
+                    nli=nli,
+                    on_chunk_done=_on_chunk,
+                )
+            else:
+                validated = []
 
-        merged = already + validated
+            merged = already + validated
+            tallies = validate.validation_tallies(merged)
+            # Inline validation during extract marks observations before this
+            # node runs; tally the full merged set so persisted metrics match.
+            tracker.metrics.observations_validated = tallies["entailed"]
+            tracker.metrics.observations_rejected = tallies["contradicted"]
+            st.detail.update(tallies)
+            _emit(state, "validate_done", tallies)
+
         # Persist the full set (already + newly validated). INSERT OR REPLACE
         # is idempotent, so re-persisting `already` is cheap and guarantees
         # every validated observation is in the DB for later evidence lookups
@@ -535,8 +603,9 @@ def make_planner_node(*, llm: LLMClient, task: str) -> Callable[[FlowState], dic
                 if not uncrawled:
                     missing = []
         else:
+            essential = _essential_target_signal_kinds(state)
             missing = [
-                k for k in _TARGET_SIGNAL_KINDS if _kind_counts(usable).get(k, 0) == 0
+                k for k in essential if _kind_counts(usable).get(k, 0) == 0
             ]
             counts = _kind_counts(usable)
             confs = {}
@@ -616,12 +685,6 @@ def route_planner_target(state: FlowState) -> str:
     if p is None:
         return "continue"
     d = p.decision
-    if (
-        d == PlannerDecision.FETCH_MORE
-        and not state.get("fetch_more_done")
-        and _has_fetch_more_targets(state, p)
-    ):
-        return "fetch_more"
     if d == PlannerDecision.WEB_SEARCH and not state.get("web_search_done") and p.suggested_queries:
         return "web_search"
     if d == PlannerDecision.STOP:
@@ -718,30 +781,21 @@ def make_external_enrich_node(
             new_obs = [validated_by_id.get(o.observation_id, o) for o in new_obs]
         remaining = [o for o in new_obs if o.validation is None]
         if remaining:
-            extra_validated, counts = validate.validate_observations(
+            extra_validated, _counts = validate.validate_observations(
                 remaining, sections_by_id, nli=nli
             )
             extra_by_id = {o.observation_id: o for o in extra_validated}
             new_obs = [extra_by_id.get(o.observation_id, o) for o in new_obs]
-        else:
-            counts = {
-                "entailed": sum(
-                    1 for o in new_obs if o.validation and o.validation.value == "entailed"
-                ),
-                "contradicted": sum(
-                    1
-                    for o in new_obs
-                    if o.validation and o.validation.value == "contradicted"
-                ),
-            }
         _persist_observations(new_obs)
+        all_obs = (state.get("observations") or []) + new_obs
+        tallies = validate.validation_tallies(all_obs)
         tracker.metrics.observations_extracted += len(new_obs)
-        tracker.metrics.observations_validated += counts.get("entailed", 0)
-        tracker.metrics.observations_rejected += counts.get("contradicted", 0)
+        tracker.metrics.observations_validated = tallies["entailed"]
+        tracker.metrics.observations_rejected = tallies["contradicted"]
 
         return {
             "sections_by_id": sections_by_id,
-            "observations": (state.get("observations") or []) + new_obs,
+            "observations": all_obs,
             "web_search_done": True,
         }
 
@@ -839,12 +893,29 @@ def make_writer_node(*, llm: LLMClient) -> Callable[[FlowState], dict]:
                     sender_vp.label,
                 )
 
+        sender_observations: list[Observation] = []
+        sender_company_id = state.get("sender_company_id") or ""
+        if sender_company_id:
+            try:
+                sender_observations = guard_mod.load_observations_for_company(
+                    sender_company_id
+                )
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "writer: failed to load sender observations for %s",
+                    sender_company_id,
+                )
+
+        target_company_name = _company_name_from_url(state.get("homepage_url") or "")
+
         with tracker.stage("write_emails"):
             _emit(state, "write_emails", {"angles": ["pain_led", "trigger_led"]})
             emails = writer_mod.write_emails(
                 sender_vp=sender_vp,
                 sender_icp=sender_icp,
                 target_observations=usable,
+                sender_observations=sender_observations,
+                target_company_name=target_company_name,
                 strategy=strategy,
                 persona=persona,
                 llm=llm,
@@ -853,144 +924,122 @@ def make_writer_node(*, llm: LLMClient) -> Callable[[FlowState], dict]:
             _emit(
                 state,
                 "write_emails_done",
-                {
-                    "emails": len(emails),
-                    "claims": sum(len(e.claims) for e in emails),
-                },
+                {"emails": len(emails)},
             )
-        return {"emails": emails}
+        # Persist the resolved VP into state so the email_guard verifier
+        # checks each statement against the exact VP that wrote the email.
+        return {"emails": emails, "sender_vp": sender_vp}
 
     return node
 
 
-def make_claim_extract_node() -> Callable[[FlowState], dict]:
-    """Deterministic claim consolidation -- no LLM call."""
+def _company_name_from_url(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse
 
-    async def node(state: FlowState) -> dict:
-        tracker = state["tracker"]
-        observations = state.get("observations") or []
-        emails = state.get("emails") or []
-        with tracker.stage("claim_extract") as st:
-            _emit(state, "claim_extract", {"emails": len(emails)})
-            consolidated = claim_extract.consolidate(
-                emails,
-                known_observation_ids=[o.observation_id for o in observations],
-            )
-            total_claims = sum(len(e.claims) for e in consolidated)
-            st.detail["claims"] = total_claims
-            _emit(
-                state,
-                "claim_extract_done",
-                {"emails": len(consolidated), "claims": total_claims},
-            )
-        return {"emails": consolidated}
-
-    return node
+        host = urlparse(url).hostname or ""
+    except Exception:  # noqa: BLE001
+        return ""
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return ""
+    label = host.split(".")[0]
+    return label.capitalize() if label else ""
 
 
-def make_claim_verify_node(*, nli: NliValidator) -> Callable[[FlowState], dict]:
-    async def node(state: FlowState) -> dict:
-        tracker = state["tracker"]
-        observations = state.get("observations") or []
-        emails = state.get("emails") or []
-        sections_by_id = state.get("sections_by_id") or {}
-        ctx = verify_mod.VerificationContext(
-            observations={o.observation_id: o for o in observations},
-            sections=sections_by_id,
+def _guard_context_from_state(state: FlowState) -> guard_mod.GuardContext:
+    sender_id = state.get("sender_company_id") or ""
+    sender_obs: list[Observation] = []
+    if sender_id:
+        sender_obs = guard_mod.load_observations_for_company(sender_id)
+    sender_vp = state.get("sender_vp")
+    sender_evidence: list[Observation] = []
+    if sender_vp:
+        sender_evidence = guard_mod.select_sender_evidence_for_verifier(
+            sender_vp, sender_obs
         )
-        with tracker.stage("claim_verify") as st:
-            total_claims = sum(len(e.claims) for e in emails)
-            _emit(
-                state,
-                "verify",
-                {"emails": len(emails), "claims": total_claims},
-            )
-            updated: list[Email] = []
-            done_claims = 0
-            for i, e in enumerate(emails, start=1):
-                claims = verify_mod.verify_email(e, ctx, nli=nli)
-                updated.append(e.model_copy(update={"claims": claims}))
-                done_claims += len(claims)
-                _emit(
-                    state,
-                    "verify_progress",
-                    {
-                        "done": done_claims,
-                        "total": total_claims,
-                        "emails_done": i,
-                        "emails_total": len(emails),
-                    },
-                )
-            tallies = {
-                "entailed": 0, "neutral": 0,
-                "contradicted": 0, "unsupported": 0,
-            }
-            for e in updated:
-                for c in e.claims:
-                    if c.status == ClaimStatus.ENTAILED:
-                        tallies["entailed"] += 1
-                    elif c.status == ClaimStatus.CONTRADICTED:
-                        tallies["contradicted"] += 1
-                    elif c.status == ClaimStatus.UNSUPPORTED:
-                        tallies["unsupported"] += 1
-                    else:
-                        tallies["neutral"] += 1
-            st.detail.update(tallies)
-            st.detail["unsupported"] = (
-                tallies["unsupported"] + tallies["contradicted"]
-            )
-            _emit(state, "verify_done", tallies)
-        return {"emails": updated}
-
-    return node
+    return guard_mod.GuardContext(
+        target_observations=state.get("observations") or [],
+        sender_observations=sender_obs,
+        sender_evidence=sender_evidence,
+        sender_icp=state.get("sender_icp"),
+        sender_vp=sender_vp,
+        strategy=state.get("strategy"),
+        persona=state.get("persona"),
+        target_company_name=_company_name_from_url(
+            state.get("homepage_url") or ""
+        ),
+    )
 
 
-def route_repair(state: FlowState) -> str:
-    if state.get("repair_done"):
-        return "skip"
-    emails = state.get("emails") or []
-    for e in emails:
-        if verify_mod.needs_repair(e.claims):
-            return "repair"
-    return "skip"
+def make_email_guard_node(
+    *, llm: LLMClient, nli: NliValidator, embedder: Embedder,
+) -> Callable[[FlowState], dict]:
+    """Independent post-generation verification on final email bodies."""
+    # ``nli`` and ``embedder`` are kept for graph-wiring compatibility; the
+    # LLM-as-judge verifier does not use them.
+    del nli, embedder
 
-
-def make_repair_node(*, llm: LLMClient, nli: NliValidator) -> Callable[[FlowState], dict]:
     async def node(state: FlowState) -> dict:
         tracker = state["tracker"]
         usage = state["usage"]
-        observations = state.get("observations") or []
         emails = state.get("emails") or []
-        sections_by_id = state.get("sections_by_id") or {}
-        ctx = verify_mod.VerificationContext(
-            observations={o.observation_id: o for o in observations},
-            sections=sections_by_id,
-        )
-        with tracker.stage("repair") as st:
-            to_repair = sum(1 for e in emails if verify_mod.needs_repair(e.claims))
-            _emit(state, "repair", {"emails_to_repair": to_repair})
-            repaired: list[Email] = []
-            done = 0
-            for e in emails:
-                if verify_mod.needs_repair(e.claims):
-                    repaired.append(
-                        verify_mod.repair_email(e, ctx, llm=llm, usage=usage, nli=nli)
+        ctx = _guard_context_from_state(state)
+
+        with tracker.stage("email_guard") as st:
+            _emit(state, "email_guard", {"emails": len(emails)})
+            guarded: list[Email] = []
+            for i, email in enumerate(emails, start=1):
+                guarded.append(
+                    guard_mod.guard_email(
+                        email, ctx=ctx, llm=llm, usage=usage
                     )
-                    done += 1
-                    _emit(
-                        state,
-                        "repair_progress",
-                        {"done": done, "total": to_repair},
-                    )
-                else:
-                    repaired.append(e)
-            repaired_count = sum(
-                1 for e in repaired for c in e.claims
-                if c.status == ClaimStatus.REPAIRED
+                )
+                _emit(
+                    state,
+                    "email_guard_progress",
+                    {"emails_done": i, "emails_total": len(emails)},
+                )
+
+            tallies = guard_mod.accumulate_statement_metrics(guarded)
+            st.detail.update(
+                {k: v for k, v in tallies.items() if k != "failed_statements"}
             )
-            st.detail["repaired"] = repaired_count
-            _emit(state, "repair_done", {"repaired_claims": repaired_count})
-        return {"emails": repaired, "repair_done": True}
+            st.detail["failed_statements"] = len(tallies["failed_statements"])  # type: ignore[arg-type]
+            _emit(
+                state,
+                "email_guard_done",
+                {
+                    "extracted": tallies["extracted_statements_count"],
+                    "supported": tallies["supported_statements_count"],
+                    "unsafe": not tallies["final_email_safe"],
+                    "verifier_ok": tallies["verification_ok"],
+                },
+            )
+
+            m = tracker.metrics
+            m.extracted_statements_count = int(tallies["extracted_statements_count"])
+            m.supported_statements_count = int(tallies["supported_statements_count"])
+            m.unsupported_statements_count = int(
+                tallies["unsupported_statements_count"]
+            )
+            m.contradicted_statements_count = int(
+                tallies["contradicted_statements_count"]
+            )
+            m.not_checkable_statements_count = int(
+                tallies["not_checkable_statements_count"]
+            )
+            m.email_regenerated = bool(tallies["email_regenerated"])
+            m.regeneration_count = int(tallies["regeneration_count"])
+            m.final_email_safe = bool(tallies["final_email_safe"])
+            m.verification_ok = bool(tallies["verification_ok"])
+            m.failed_statements = list(tallies["failed_statements"])  # type: ignore[arg-type]
+
+        return {"emails": guarded}
 
     return node
 
@@ -1005,12 +1054,8 @@ def make_analytics_node(
         tracker = state["tracker"]
         usage = state["usage"]
         observations = state.get("observations") or []
-        emails = state.get("emails") or []
-        sections_by_id = state.get("sections_by_id") or {}
-        ctx = verify_mod.VerificationContext(
-            observations={o.observation_id: o for o in observations},
-            sections=sections_by_id,
-        )
+        emails = list(state.get("emails") or [])
+        guard_ctx = _guard_context_from_state(state)
 
         # Angle overlap + optional divergence repair.
         if len(emails) == 2:
@@ -1036,10 +1081,44 @@ def make_analytics_node(
                             llm=llm,
                             usage=usage,
                         )
-                        repaired = repaired.model_copy(
-                            update={"claims": verify_mod.verify_email(repaired, ctx, nli=nli)}
+                        repaired = guard_mod.guard_email(
+                            repaired,
+                            ctx=guard_ctx,
+                            llm=llm,
+                            usage=usage,
                         )
                         emails[pain_idx] = repaired
+                        tallies = guard_mod.accumulate_statement_metrics(emails)
+                        tracker.metrics.extracted_statements_count = int(
+                            tallies["extracted_statements_count"]
+                        )
+                        tracker.metrics.supported_statements_count = int(
+                            tallies["supported_statements_count"]
+                        )
+                        tracker.metrics.unsupported_statements_count = int(
+                            tallies["unsupported_statements_count"]
+                        )
+                        tracker.metrics.contradicted_statements_count = int(
+                            tallies["contradicted_statements_count"]
+                        )
+                        tracker.metrics.not_checkable_statements_count = int(
+                            tallies["not_checkable_statements_count"]
+                        )
+                        tracker.metrics.email_regenerated = bool(
+                            tallies["email_regenerated"]
+                        )
+                        tracker.metrics.regeneration_count = int(
+                            tallies["regeneration_count"]
+                        )
+                        tracker.metrics.final_email_safe = bool(
+                            tallies["final_email_safe"]
+                        )
+                        tracker.metrics.verification_ok = bool(
+                            tallies["verification_ok"]
+                        )
+                        tracker.metrics.failed_statements = list(
+                            tallies["failed_statements"]  # type: ignore[arg-type]
+                        )
                         sim2 = overlap_mod.measure_overlap(
                             emails[0], emails[1], embedder
                         )
@@ -1063,19 +1142,35 @@ def make_analytics_node(
                         {"overlap": sim, "repaired": False},
                     )
 
-        # Claim map + tallies.
-        claim_map = verify_mod.build_claim_map(emails, ctx)
-        for c in claim_map:
-            tracker.metrics.claims_total += 1
-            if c.status == ClaimStatus.ENTAILED:
-                tracker.metrics.claims_supported += 1
-            elif c.status == ClaimStatus.UNSUPPORTED:
-                tracker.metrics.claims_unsupported += 1
-            elif c.status == ClaimStatus.CONTRADICTED:
-                tracker.metrics.claims_contradicted += 1
-            elif c.status == ClaimStatus.REPAIRED:
-                tracker.metrics.claims_repaired += 1
-                tracker.metrics.claims_supported += 1
+        claim_map = guard_mod.build_statement_map(emails)
+        tallies = guard_mod.accumulate_statement_metrics(emails)
+        m = tracker.metrics
+        m.extracted_statements_count = int(tallies["extracted_statements_count"])
+        m.supported_statements_count = int(tallies["supported_statements_count"])
+        m.unsupported_statements_count = int(tallies["unsupported_statements_count"])
+        m.contradicted_statements_count = int(tallies["contradicted_statements_count"])
+        m.not_checkable_statements_count = int(
+            tallies["not_checkable_statements_count"]
+        )
+        m.email_regenerated = bool(tallies["email_regenerated"])
+        m.regeneration_count = int(tallies["regeneration_count"])
+        m.final_email_safe = bool(tallies["final_email_safe"])
+        m.verification_ok = bool(tallies["verification_ok"])
+        m.failed_statements = list(tallies["failed_statements"])  # type: ignore[arg-type]
+        checkable = m.supported_statements_count + m.unsupported_statements_count + m.contradicted_statements_count
+        if checkable > 0:
+            m.evidence_support_rate = round(
+                m.supported_statements_count / checkable, 3
+            )
+        m.claims_total = m.extracted_statements_count
+        m.claims_supported = m.supported_statements_count
+        m.claims_unsupported = m.unsupported_statements_count
+        m.claims_contradicted = m.contradicted_statements_count
+        if m.extracted_statements_count > 0:
+            m.claim_support_rate = m.evidence_support_rate
+            m.unsupported_claim_rate = round(
+                m.unsupported_statements_count / m.extracted_statements_count, 3
+            )
 
         # Persist scoped to (target_company_id, persona_id). Re-running for
         # the same persona overwrites; running for a different persona keeps

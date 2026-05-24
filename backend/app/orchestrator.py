@@ -104,11 +104,13 @@ def _existing_or_new_persona(
     """
     role = (persona.role or "").strip()
     seniority = persona.seniority.value
+    name = (persona.name or "").strip() or None
     row = fetchone(
         "SELECT persona_id FROM personas "
         "WHERE target_company_id = ? AND role = ? AND seniority = ? "
+        "  AND COALESCE(name, '') = COALESCE(?, '') "
         "ORDER BY created_at DESC LIMIT 1",
-        (target_company_id, role, seniority),
+        (target_company_id, role, seniority, name),
     )
     if row:
         return row["persona_id"]
@@ -118,7 +120,7 @@ def _existing_or_new_persona(
             "INSERT INTO personas "
             "(persona_id, target_company_id, name, role, seniority, created_at) "
             "VALUES (?,?,?,?,?,?)",
-            (persona_id, target_company_id, None, role, seniority, _now()),
+            (persona_id, target_company_id, name, role, seniority, _now()),
         )
     return persona_id
 
@@ -194,11 +196,12 @@ async def run_sender_flow_async(
             tracker=tracker,
         )
         response = await run_sender_graph(initial_state=state, llm=llm, nli=nli)
+        tracker.finalize_metrics()
         _persist_run_metrics(
             kind="sender",
             company_id=response.company_id,
             target_company_id=None,
-            metrics_json=response.metrics.model_dump_json(),
+            metrics_json=tracker.metrics.model_dump_json(),
         )
         progress("done", {
             "company_id": response.company_id,
@@ -278,16 +281,18 @@ async def run_target_flow_async(
             embedder=embedder,
             external=external,
         )
+        tracker.finalize_metrics()
         _persist_run_metrics(
             kind="target",
             company_id=sender_company_id,
             target_company_id=response.target_company_id,
-            metrics_json=response.metrics.model_dump_json(),
+            metrics_json=tracker.metrics.model_dump_json(),
         )
         progress("done", {
             "target_company_id": response.target_company_id,
-            "claims_total": tracker.metrics.claims_total,
-            "claims_supported": tracker.metrics.claims_supported,
+            "extracted_statements_count": tracker.metrics.extracted_statements_count,
+            "supported_statements_count": tracker.metrics.supported_statements_count,
+            "final_email_safe": tracker.metrics.final_email_safe,
             "angle_overlap": tracker.metrics.angle_overlap,
         })
         return response

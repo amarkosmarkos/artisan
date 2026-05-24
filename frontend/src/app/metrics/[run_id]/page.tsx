@@ -46,6 +46,10 @@ export default function RunDetailPage() {
   if (!data) return null;
 
   const m = data.metrics;
+  const isTarget = data.kind === "target";
+  const latencyMs = effectiveLatencyMs(m);
+  const validationRate = effectiveValidationRate(m);
+  const claimSupportRate = isTarget ? effectiveClaimSupportRate(m) : null;
   const senderHref = data.company_id ? `/senders/${data.company_id}` : null;
   const targetHref = data.target_company_id
     ? `/targets/${data.target_company_id}`
@@ -102,7 +106,9 @@ export default function RunDetailPage() {
       <div className="grid gap-3 grid-cols-2 md:grid-cols-4">
         <Stat
           label="Latency"
-          value={m.latency_ms ? `${(m.latency_ms / 1000).toFixed(1)}s` : "—"}
+          value={
+            latencyMs !== null ? `${(latencyMs / 1000).toFixed(1)}s` : "—"
+          }
         />
         <Stat
           label="Tokens"
@@ -125,29 +131,27 @@ export default function RunDetailPage() {
         />
         <Stat
           label="Validation rate"
-          value={
-            m.observation_validation_rate !== null
-              ? `${((m.observation_validation_rate ?? 0) * 100).toFixed(0)}%`
-              : "—"
-          }
+          value={formatPct(validationRate)}
         />
         <Stat
-          label="Claim support"
-          value={
-            m.claim_support_rate !== null
-              ? `${((m.claim_support_rate ?? 0) * 100).toFixed(0)}%`
-              : "—"
+          label="Evidence support"
+          value={isTarget ? formatPct(claimSupportRate) : "N/A"}
+          sub={
+            isTarget
+              ? `${statementSupported(m)}/${statementTotal(m)} supported · regen ${m.regeneration_count ?? 0} · ${m.final_email_safe === false ? "unsafe" : "safe"}`
+              : "Target runs only"
           }
-          sub={`${m.claims_supported ?? 0}/${m.claims_total ?? 0} · repaired ${m.claims_repaired ?? 0}`}
         />
         <Stat
           label="Angle overlap"
           value={
-            m.angle_overlap !== null
-              ? (m.angle_overlap ?? 0).toFixed(2)
-              : "—"
+            !isTarget
+              ? "N/A"
+              : m.angle_overlap !== null
+                ? (m.angle_overlap ?? 0).toFixed(2)
+                : "—"
           }
-          sub="cosine"
+          sub={isTarget ? "cosine" : "Target runs only"}
         />
       </div>
 
@@ -186,18 +190,29 @@ export default function RunDetailPage() {
 function Warnings({ metrics }: { metrics: RunMetrics }) {
   const issues: { label: string; tone: "destructive" | "warning"; count: number }[] =
     [];
-  if (metrics.claims_contradicted) {
+  const contradicted =
+    metrics.contradicted_statements_count ?? metrics.claims_contradicted ?? 0;
+  if (contradicted > 0) {
     issues.push({
-      label: "Contradicted claims",
+      label: "Contradicted statements",
       tone: "destructive",
-      count: metrics.claims_contradicted,
+      count: contradicted,
     });
   }
-  if (metrics.claims_unsupported) {
+  const unsupported =
+    metrics.unsupported_statements_count ?? metrics.claims_unsupported ?? 0;
+  if (unsupported > 0) {
     issues.push({
-      label: "Unsupported claims",
+      label: "Unsupported statements",
       tone: "warning",
-      count: metrics.claims_unsupported,
+      count: unsupported,
+    });
+  }
+  if (metrics.final_email_safe === false) {
+    issues.push({
+      label: "Email failed safety check",
+      tone: "destructive",
+      count: metrics.failed_statements?.length ?? 1,
     });
   }
   // Coverage-style warnings from planner.
@@ -462,6 +477,49 @@ function Stat({
       {sub && <p className="text-[10px] text-muted-foreground">{sub}</p>}
     </div>
   );
+}
+
+function formatPct(rate: number | null): string {
+  if (rate === null) return "—";
+  return `${(rate * 100).toFixed(0)}%`;
+}
+
+function effectiveLatencyMs(m: RunMetrics): number | null {
+  if (m.latency_ms && m.latency_ms > 0) return m.latency_ms;
+  const stageTotal = (m.stages ?? []).reduce(
+    (sum, s) => sum + (s.duration_ms || 0),
+    0,
+  );
+  return stageTotal > 0 ? stageTotal : null;
+}
+
+function effectiveValidationRate(m: RunMetrics): number | null {
+  if (m.observation_validation_rate != null) {
+    return m.observation_validation_rate;
+  }
+  const extracted = m.observations_extracted ?? 0;
+  const validated = m.observations_validated ?? 0;
+  return extracted > 0 && validated > 0 ? validated / extracted : null;
+}
+
+function statementTotal(m: RunMetrics): number {
+  return m.extracted_statements_count ?? m.claims_total ?? 0;
+}
+
+function statementSupported(m: RunMetrics): number {
+  return m.supported_statements_count ?? m.claims_supported ?? 0;
+}
+
+function effectiveClaimSupportRate(m: RunMetrics): number | null {
+  if (m.evidence_support_rate != null) return m.evidence_support_rate;
+  if (m.claim_support_rate != null) return m.claim_support_rate;
+  const checkable =
+    statementSupported(m) +
+    (m.unsupported_statements_count ?? m.claims_unsupported ?? 0) +
+    (m.contradicted_statements_count ?? m.claims_contradicted ?? 0);
+  if (checkable > 0) return statementSupported(m) / checkable;
+  const total = statementTotal(m);
+  return total > 0 ? statementSupported(m) / total : null;
 }
 
 function prettyUrl(url: string): string {

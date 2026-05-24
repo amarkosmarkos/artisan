@@ -16,13 +16,19 @@ class Settings(BaseSettings):
     azure_openai_api_key: str = ""
     azure_openai_endpoint: str = ""
     azure_openai_api_version: str = "2024-10-21"
+    # Responses API (web_search). Chat uses azure_openai_api_version above;
+    # web search needs the v1 Responses route or a preview api-version.
+    azure_openai_responses_api_version: str = "2025-03-01-preview"
     llm_model: str = "gpt-4o-mini"  # Azure deployment name
+    # Optional deployment for Responses web_search; defaults to llm_model.
+    web_search_model: str = ""
+    web_search_timeout_s: float = 120.0
     llm_temperature: float = 0.1
     llm_max_retries: int = 2
     llm_timeout_s: float = 45.0
     # Optional Azure deployment name for the email writer. Leave empty to use
     # llm_model; set to your highest-quality deployment for better copy.
-    writer_llm_model: str = "gpt-5.4"
+    writer_llm_model: str = "gpt-4o"
     writer_llm_temperature: float = 0.55
 
     # Embeddings / NLI (HuggingFace, CPU)
@@ -50,8 +56,17 @@ class Settings(BaseSettings):
 
     # LLM extraction parallelism. Batches are independent so we fan them out
     # concurrently. Tune this with Azure rate limits in mind (RPM/TPM).
-    extract_concurrency: int = 6
-    extract_batch_size: int = 6
+    extract_concurrency: int = 10
+    extract_batch_size: int = 10
+
+    # Target crawl + extraction limits (one pass; no fetch_more in target flow).
+    target_crawl_max_pages: int = 5
+    target_crawl_max_depth: int = 1
+    target_max_crawl_passes: int = 1
+    target_max_sections_for_extraction: int = 40
+
+    # Sender fetch_more repair pass (at most once; capped page count).
+    fetch_more_max_pages: int = 2
 
     # External signal provider (target enrichment only)
     external_signal_provider: Literal["disabled", "openai_web_search"] = "disabled"

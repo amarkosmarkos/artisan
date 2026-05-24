@@ -169,3 +169,20 @@ def filter_for_synthesis(observations: list[Observation]) -> list[Observation]:
             if o.confidence >= 0.7:
                 kept.append(o)
     return kept
+
+
+def validation_tallies(observations: list[Observation]) -> dict[str, int]:
+    """Count NLI verdicts across a list of observations."""
+    entailed = contradicted = neutral = 0
+    for o in observations:
+        if o.validation == NliLabel.ENTAILED:
+            entailed += 1
+        elif o.validation == NliLabel.CONTRADICTED:
+            contradicted += 1
+        elif o.validation == NliLabel.NEUTRAL:
+            neutral += 1
+    return {
+        "entailed": entailed,
+        "contradicted": contradicted,
+        "neutral": neutral,
+    }

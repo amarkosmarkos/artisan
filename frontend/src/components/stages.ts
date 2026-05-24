@@ -14,9 +14,7 @@ export type StageKey =
   | "vp"
   | "strategy"
   | "write_emails"
-  | "claim_extract"
-  | "verify"
-  | "repair"
+  | "email_guard"
   | "angle_overlap"
   | "done";
 
@@ -46,9 +44,7 @@ export const TARGET_STAGES: StageDef[] = [
   { key: "web_search",    label: "External enrichment",  hint: "bounded, planner-gated" },
   { key: "strategy",      label: "Strategy artifact",    hint: "fit + persona + 2 angles" },
   { key: "write_emails",  label: "Write emails",         hint: "pain-led + trigger-led" },
-  { key: "claim_extract", label: "Consolidate claims",   hint: "" },
-  { key: "verify",        label: "Verify claims (NLI)",  hint: "" },
-  { key: "repair",        label: "Repair (bounded)",     hint: "at most once" },
+  { key: "email_guard",   label: "Verify email body",    hint: "extract statements + guard" },
   { key: "angle_overlap", label: "Angle overlap",        hint: "diverge if too similar" },
   { key: "done",          label: "Done",                 hint: "" },
 ];
@@ -88,12 +84,12 @@ export function normalizeStage(stage: string): StageKey | null {
   if (stage === "strategy" || stage === "strategy_done") return "strategy";
   if (stage === "write_emails" || stage === "write_emails_done")
     return "write_emails";
-  if (stage === "claim_extract" || stage === "claim_extract_done")
-    return "claim_extract";
-  if (stage === "verify" || stage === "verify_progress" || stage === "verify_done")
-    return "verify";
-  if (stage === "repair" || stage === "repair_progress" || stage === "repair_done")
-    return "repair";
+  if (
+    stage === "email_guard" ||
+    stage === "email_guard_progress" ||
+    stage === "email_guard_done"
+  )
+    return "email_guard";
   if (
     stage === "angle_overlap" ||
     stage === "angle_overlap_repair" ||

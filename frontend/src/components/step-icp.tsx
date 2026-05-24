@@ -25,6 +25,7 @@ import {
   useEvidenceLookup,
 } from "@/components/claim-evidence";
 import { ExpandableEvidence, EvidenceList } from "./evidence-popover";
+import { SuggestedTargetsPanel } from "./suggested-targets-panel";
 import type {
   FieldWithEvidence,
   ICP,
@@ -44,6 +45,7 @@ export function StepIcp({ sender, onContinue, running }: Props) {
   const [targetUrl, setTargetUrl] = React.useState("");
   const [role, setRole] = React.useState("VP of Sales");
   const [seniority, setSeniority] = React.useState<Seniority>("vp");
+  const [name, setName] = React.useState("");
 
   const evidenceIds = React.useMemo(
     () => collectSenderEvidenceIds(sender),
@@ -66,9 +68,14 @@ export function StepIcp({ sender, onContinue, running }: Props) {
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!targetUrl.trim() || running) return;
+    const trimmedName = name.trim();
     onContinue({
       target_url: targetUrl.trim(),
-      persona: { role, seniority },
+      persona: {
+        role,
+        seniority,
+        ...(trimmedName ? { name: trimmedName } : {}),
+      },
     });
   };
 
@@ -122,6 +129,18 @@ export function StepIcp({ sender, onContinue, running }: Props) {
         </div>
       </div>
 
+      <SuggestedTargetsPanel
+        senderCompanyId={sender.company_id}
+        onGenerateOutreach={onContinue}
+        onPrefillEvaluate={({ target_url, persona }) => {
+          setTargetUrl(target_url);
+          setRole(persona.role);
+          setSeniority(persona.seniority);
+          setName((persona.name ?? "").trim());
+        }}
+        running={running}
+      />
+
       <form
         onSubmit={submit}
         className="mt-10 rounded-xl border border-border bg-card/40 p-6"
@@ -131,11 +150,17 @@ export function StepIcp({ sender, onContinue, running }: Props) {
           We&apos;ll fit-check the target against this ICP and draft two grounded outreach
           angles for the persona below.
         </p>
-        <div className="mt-6 grid gap-4 md:grid-cols-[1fr,200px,160px,auto]">
+        <div className="mt-6 grid gap-4 md:grid-cols-[1fr,160px,200px,160px,auto]">
           <Input
             placeholder="https://target-company.com"
             value={targetUrl}
             onChange={(e) => setTargetUrl(e.target.value)}
+            disabled={running}
+          />
+          <Input
+            placeholder="Recipient name (optional)"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
             disabled={running}
           />
           <Input

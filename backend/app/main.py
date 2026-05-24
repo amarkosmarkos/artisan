@@ -62,12 +62,17 @@ def create_app() -> FastAPI:
         # Must be async: sync routes run in the anyio threadpool, which we
         # already saturate with asyncio.to_thread LLM/NLI workers during a
         # pipeline run. A sync health endpoint would hang under load.
+        import openai
+        from openai import OpenAI
+
         return {
             "ok": True,
             "llm_model": settings.llm_model,
             "writer_llm_model": settings.writer_llm_model or settings.llm_model,
             "embedding_model": settings.embedding_model,
             "nli_model": settings.nli_model,
+            "openai_sdk_version": openai.__version__,
+            "responses_api_available": hasattr(OpenAI(api_key="x"), "responses"),
         }
 
     return app

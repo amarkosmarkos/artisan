@@ -20,10 +20,12 @@ import {
   type EvidenceRecord,
   type ObservationRow,
 } from "@/lib/api";
-import type { ClaimStatus } from "@/lib/types";
+import type { ClaimStatus, StatementSupportStatus } from "@/lib/types";
+
+type VerificationStatus = ClaimStatus | StatementSupportStatus;
 
 const STATUS_META: Record<
-  ClaimStatus,
+  VerificationStatus,
   {
     label: string;
     variant: "success" | "default" | "muted" | "warning" | "destructive";
@@ -64,6 +66,25 @@ const STATUS_META: Record<
     icon: <XOctagon className="h-3 w-3" />,
     explain:
       "NLI contradicted: evidence directly contradicts the claim. Do not send as-is.",
+  },
+  supported: {
+    label: "supported",
+    variant: "success",
+    icon: <Check className="h-3 w-3" />,
+    explain: "Supported by available workflow context.",
+  },
+  not_checkable: {
+    label: "not checkable",
+    variant: "muted",
+    icon: <AlertTriangle className="h-3 w-3" />,
+    explain: "Non-factual or rhetorical; not verified as a fact claim.",
+  },
+  sender_context_not_verified: {
+    label: "sender context not verified",
+    variant: "muted",
+    icon: <AlertTriangle className="h-3 w-3" />,
+    explain:
+      "Sender / value-prop positioning; no sender context available to verify against. Not a safety failure.",
   },
 };
 
@@ -128,7 +149,7 @@ export function ClaimEvidence({
 }: {
   claim: string;
   evidenceIds: string[];
-  status?: ClaimStatus;
+  status?: VerificationStatus;
   score?: number | null;
   evidence: Map<string, EvidenceRecord>;
   defaultOpen?: boolean;

@@ -344,6 +344,7 @@ async def crawl_company(
     homepage_url: str,
     *,
     max_pages: int | None = None,
+    max_depth: int | None = None,
     explicit_urls: list[str] | None = None,
 ) -> CrawlOutput:
     """Crawl a company website.
@@ -358,6 +359,7 @@ async def crawl_company(
     homepage_url = _normalize_url(homepage_url)
     domain = _domain_of(homepage_url)
     cap = max_pages or settings.crawl_max_pages
+    depth_cap = max_depth if max_depth is not None else settings.crawl_max_depth
 
     timeout = httpx.Timeout(settings.crawl_page_timeout_s)
     headers = {"User-Agent": settings.crawl_user_agent}
@@ -403,7 +405,7 @@ async def crawl_company(
                     seed=homepage_url,
                     domain=domain,
                     max_pages=cap,
-                    max_depth=settings.crawl_max_depth,
+                    max_depth=depth_cap,
                 )
         finally:
             await renderer.close()

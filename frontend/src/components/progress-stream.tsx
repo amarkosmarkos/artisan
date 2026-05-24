@@ -165,52 +165,23 @@ function deriveStageState(events: ProgressEvent[], stages: readonly { key: Stage
         setSummary("write_emails", "drafting pain + trigger");
         break;
       case "write_emails_done":
+        setSummary("write_emails", `${num(d.emails)} emails drafted`);
+        break;
+      case "email_guard":
+        setSummary("email_guard", `checking ${num(d.emails)} email(s)`);
+        break;
+      case "email_guard_progress":
         setSummary(
-          "write_emails",
-          `${num(d.emails)} emails · ${num(d.claims)} claims`,
+          "email_guard",
+          `${num(d.emails_done)}/${num(d.emails_total)} emails`,
         );
         break;
-      case "claim_extract":
-        setSummary("claim_extract", `${num(d.emails)} emails`);
-        break;
-      case "claim_extract_done":
+      case "email_guard_done":
         setSummary(
-          "claim_extract",
-          `${num(d.claims)} claims across ${num(d.emails)} emails`,
-        );
-        break;
-      case "verify":
-        setSummary("verify", `${num(d.claims)} claims to check`);
-        break;
-      case "verify_progress":
-        setSummary(
-          "verify",
-          `NLI ${num(d.done)}/${num(d.total)}`,
-        );
-        break;
-      case "verify_done":
-        setSummary(
-          "verify",
-          `${num(d.entailed)} entailed · ${num(d.unsupported) + num(d.contradicted)} unsupported`,
-        );
-        break;
-      case "repair":
-        setSummary(
-          "repair",
-          num(d.emails_to_repair) > 0
-            ? `${num(d.emails_to_repair)} email(s) to repair`
-            : "nothing to repair",
-        );
-        break;
-      case "repair_progress":
-        setSummary("repair", `${num(d.done)}/${num(d.total)}`);
-        break;
-      case "repair_done":
-        setSummary(
-          "repair",
-          num(d.repaired_claims) > 0
-            ? `${num(d.repaired_claims)} claim(s) repaired`
-            : "no claims repaired",
+          "email_guard",
+          `${num(d.supported)}/${num(d.extracted)} supported · ${
+            d.unsafe ? "unsafe" : "safe"
+          }`,
         );
         break;
       case "angle_overlap":

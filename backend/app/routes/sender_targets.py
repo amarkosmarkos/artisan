@@ -9,6 +9,11 @@ This module exposes:
   associate it to the sender (idempotent on URL).
 - ``DELETE /senders/{sender_company_id}/targets/{target_company_id}`` —
   remove the association (does NOT delete the target's evidence).
+- ``POST   /senders/{sender_company_id}/discover-targets`` — use OpenAI
+  web search to propose up to 3 well-sourced candidate targets that
+  match the sender's ICP and value propositions. Does NOT persist
+  anything; the caller adds the chosen suggestions via the standard
+  ``POST .../targets`` endpoint.
 - ``GET    /companies/{target_company_id}/personas`` — personas attached to
   a target. A persona is a *recipient*: role + seniority + optional name.
 - ``POST   /companies/{target_company_id}/personas`` — create a persona.
@@ -16,6 +21,7 @@ This module exposes:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -24,7 +30,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..db import fetchall, fetchone, tx
-from ..schemas import Seniority
+from ..schemas import Seniority, SuggestedTargetsResponse
+from ..services.llm import get_llm
+from ..synthesis.target_discovery import discover_targets
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +133,32 @@ def add_sender_target(sender_company_id: str, req: AddTargetRequest) -> dict:
         "target_url": url,
         "company_created": created,
     }
+
+
+@router.post("/senders/{sender_company_id}/discover-targets")
+async def discover_sender_targets(sender_company_id: str) -> SuggestedTargetsResponse:
+    """Suggest up to 3 candidate target companies for this sender.
+
+    Uses OpenAI web search to discover companies whose public signals
+    match the sender's ICP / value propositions. The endpoint never
+    persists targets and never starts target analysis: the user adds
+    chosen suggestions via the standard "add target" flow.
+    """
+    sender = fetchone(
+        "SELECT company_id, role FROM companies WHERE company_id = ?",
+        (sender_company_id,),
+    )
+    if not sender:
+        raise HTTPException(status_code=404, detail="sender not found")
+    if sender["role"] != "sender":
+        raise HTTPException(
+            status_code=400,
+            detail=f"company {sender_company_id} is registered as a {sender['role']}",
+        )
+
+    llm = get_llm()
+    # Discovery does sync LLM/web-search work; keep the request loop free.
+    return await asyncio.to_thread(discover_targets, sender_company_id, llm=llm)
 
 
 @router.delete("/senders/{sender_company_id}/targets/{target_company_id}")

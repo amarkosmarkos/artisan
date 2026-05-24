@@ -39,8 +39,18 @@ export function StepAnalytics({ result, onBack }: Props) {
       value: m.compression_ratio ? `${m.compression_ratio.toFixed(2)}x` : "—",
       hint: `${formatNumber(m.raw_cleaned_chars)} → ${formatNumber(m.evidence_chars_used)} chars`,
     },
-    { label: "Claims used", value: String(m.claims_total) },
-    { label: "Unsupported claims", value: String(m.claims_unsupported) },
+    {
+      label: "Statements checked",
+      value: String(m.extracted_statements_count ?? m.claims_total ?? 0),
+    },
+    {
+      label: "Unsupported statements",
+      value: String(m.unsupported_statements_count ?? m.claims_unsupported ?? 0),
+    },
+    {
+      label: "Email safe",
+      value: m.final_email_safe === false ? "no" : "yes",
+    },
     {
       label: "Angle overlap",
       value: m.angle_overlap === null ? "—" : m.angle_overlap.toFixed(3),
@@ -158,6 +168,7 @@ export function StepAnalytics({ result, onBack }: Props) {
                   <tr className="border-b border-border/60">
                     <th className="text-left font-medium px-3 py-2">Angle</th>
                     <th className="text-left font-medium px-3 py-2">Claim</th>
+                    <th className="text-left font-medium px-3 py-2">Category</th>
                     <th className="text-left font-medium px-3 py-2">Status</th>
                     <th className="text-left font-medium px-3 py-2">NLI</th>
                     <th className="text-left font-medium px-3 py-2">Citations</th>
@@ -172,18 +183,31 @@ export function StepAnalytics({ result, onBack }: Props) {
                       <td className="px-3 py-2 max-w-md">
                         <span className="line-clamp-2">{c.text}</span>
                       </td>
+                      <td className="px-3 py-2 text-xs">
+                        {c.category === "target_fact"
+                          ? "target fact"
+                          : c.category === "sender_or_value_prop"
+                            ? "sender / value prop"
+                            : c.category === "cta"
+                              ? "CTA"
+                              : "generic"}
+                      </td>
                       <td className="px-3 py-2">
                         <span
                           className={cn(
                             "text-xs",
-                            c.status === "entailed" && "text-[hsl(var(--success))]",
-                            c.status === "repaired" && "text-foreground",
+                            c.status === "supported" &&
+                              "text-[hsl(var(--success))]",
                             c.status === "contradicted" && "text-destructive",
                             c.status === "unsupported" && "text-[hsl(var(--warning))]",
-                            c.status === "neutral" && "text-muted-foreground"
+                            (c.status === "not_checkable" ||
+                              c.status === "sender_context_not_verified") &&
+                              "text-muted-foreground"
                           )}
                         >
-                          {c.status}
+                          {c.status === "sender_context_not_verified"
+                            ? "sender context not verified"
+                            : c.status}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-xs font-mono tabular-nums text-muted-foreground">
@@ -212,7 +236,7 @@ export function StepAnalytics({ result, onBack }: Props) {
                   ))}
                   {result.claim_map.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="px-3 py-4 text-sm text-muted-foreground text-center">
+                      <td colSpan={6} className="px-3 py-4 text-sm text-muted-foreground text-center">
                         No claims recorded.
                       </td>
                     </tr>

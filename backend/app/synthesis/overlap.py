@@ -14,7 +14,7 @@ import logging
 
 from pydantic import BaseModel, Field
 
-from ..schemas import AngleType, Email, EmailClaim, Observation
+from ..schemas import AngleType, Email, Observation
 from ..services.embed import Embedder, cosine
 from ..services.llm import LLMClient, UsageAccumulator
 
@@ -27,19 +27,17 @@ ANGLE_OVERLAP_MAX = 0.78  # above this we trigger divergence repair
 class _DivergenceDraft(BaseModel):
     subject: str
     body: str
-    claims: list[dict] = Field(default_factory=list)
 
 
 _SYSTEM_DIVERGE = """You rewrite the PAIN-LED email so that it is meaningfully different from the trigger-led email.
 
 Constraints:
 - Lead with the target's likely PROBLEM, not with a recent event.
-- Do NOT introduce any new facts about the target; cite only the provided observation_ids for target-specific claims.
+- Do NOT introduce any new facts about the target beyond the provided observations.
 - Keep length 4-7 short sentences.
 - Different opening sentence and different call-to-action than the trigger-led email.
 
-Output JSON:
-{ "subject": "...", "body": "...", "claims": [ { "text": "...", "evidence_refs": [observation_id, ...] } ] }
+Output JSON: { "subject": "...", "body": "..." }
 """
 
 
@@ -80,23 +78,11 @@ def diverge_pain_led(
         log.warning("diverge_pain_led failed: %s", e)
         return pain
 
-    obs_ids = {o.observation_id for o in target_observations}
-    new_claims = []
-    for c in draft.claims:
-        refs = [r for r in (c.get("evidence_refs") or []) if r in obs_ids]
-        new_claims.append(
-            EmailClaim(
-                claim_id=f"claim_div_{c.get('claim_id', '')}",
-                text=str(c.get("text", "")).strip(),
-                evidence_refs=refs,
-            )
-        )
-
     return pain.model_copy(
         update={
             "subject": draft.subject.strip(),
             "body": draft.body.strip(),
-            "claims": new_claims or pain.claims,
+            "safety": None,
             "angle": AngleType.PAIN_LED,
         }
     )

@@ -2,14 +2,11 @@
 
 ```
 START -> target_crawl -> target_extract -> target_validate -> planner
-       ├── (fetch_more)  -> target_crawl (explicit URLs; max once)
        ├── (web_search)  -> external_enrichment -> strategy
        ├── (continue|low_conf) -> strategy
        └── (stop)        -> END
 
-   strategy -> writer -> claim_extract -> claim_verify
-       ├── needs repair -> repair (max once) -> analytics -> END
-       └── ok          -> analytics -> END
+   strategy -> writer -> guard_emails -> analytics -> END
 ```
 """
 from __future__ import annotations
@@ -52,7 +49,6 @@ def build_target_graph(
     g = StateGraph(FlowState)
 
     g.add_node("target_crawl", nodes.make_crawl_node())
-    g.add_node("target_fetch_more", nodes.make_crawl_node(fetch_more=True))
     g.add_node(
         "target_extract", nodes.make_extract_node(llm=llm, nli=nli, task="target")
     )
@@ -62,14 +58,13 @@ def build_target_graph(
         "external_enrichment",
         nodes.make_external_enrich_node(llm=llm, provider=external, nli=nli),
     )
-    # NOTE: LangGraph forbids node names that collide with state keys.
-    # Our FlowState has a `strategy` key, so the node must be named differently.
     g.add_node("synthesize_strategy", nodes.make_strategy_node(llm=llm))
     g.add_node("write_emails", nodes.make_writer_node(llm=llm))
-    g.add_node("extract_claims", nodes.make_claim_extract_node())
-    g.add_node("verify_claims", nodes.make_claim_verify_node(nli=nli))
-    g.add_node("repair_claims", nodes.make_repair_node(llm=llm, nli=nli))
-    g.add_node("compute_analytics", nodes.make_analytics_node(embedder=embedder, llm=llm, nli=nli))
+    g.add_node("guard_emails", nodes.make_email_guard_node(llm=llm, nli=nli, embedder=embedder))
+    g.add_node(
+        "compute_analytics",
+        nodes.make_analytics_node(embedder=embedder, llm=llm, nli=nli),
+    )
 
     g.add_edge(START, "target_crawl")
     g.add_edge("target_crawl", "target_extract")
@@ -80,25 +75,16 @@ def build_target_graph(
         "planner",
         nodes.route_planner_target,
         {
-            "fetch_more": "target_fetch_more",
             "web_search": "external_enrichment",
             "continue": "synthesize_strategy",
             "stop": END,
         },
     )
-    g.add_edge("target_fetch_more", "target_extract")
     g.add_edge("external_enrichment", "synthesize_strategy")
 
     g.add_edge("synthesize_strategy", "write_emails")
-    g.add_edge("write_emails", "extract_claims")
-    g.add_edge("extract_claims", "verify_claims")
-
-    g.add_conditional_edges(
-        "verify_claims",
-        nodes.route_repair,
-        {"repair": "repair_claims", "skip": "compute_analytics"},
-    )
-    g.add_edge("repair_claims", "compute_analytics")
+    g.add_edge("write_emails", "guard_emails")
+    g.add_edge("guard_emails", "compute_analytics")
     g.add_edge("compute_analytics", END)
 
     return g.compile()
@@ -122,8 +108,6 @@ async def run_target_graph(
     tracker = final["tracker"]
     assert persona is not None, "target flow requires a persona"
 
-    # Defensive refusal: if the Planner stopped early, surface that instead
-    # of inventing a strategy.
     if strategy is None:
         strategy = StrategyArtifact(
             fit_assessment=FitAssessment(

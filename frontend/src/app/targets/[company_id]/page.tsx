@@ -51,7 +51,6 @@ import {
 import type {
   AngleType,
   Email,
-  EmailClaim,
   FitLevel,
   Seniority,
 } from "@/lib/types";
@@ -348,9 +347,19 @@ function PersonaPanel({
   const refs = React.useMemo(() => {
     const ids: string[] = [];
     angles.forEach((a) => ids.push(...a.evidence_refs));
-    persona.emails.forEach((e) =>
-      e.claims.forEach((c) => ids.push(...c.evidence_refs)),
-    );
+    persona.emails.forEach((e) => {
+      for (const s of e.safety?.statements ?? []) {
+        for (const ref of s.context_refs) {
+          if (
+            ref.ref_type === "observation" &&
+            (ref.ref_id.startsWith("obs_") ||
+              ref.ref_id.startsWith("sender:obs_"))
+          ) {
+            ids.push(ref.ref_id.replace(/^sender:/, ""));
+          }
+        }
+      }
+    });
     observations.forEach((o) => ids.push(o.observation_id));
     if (selectedVp) ids.push(...selectedVp.evidence_refs);
     return ids;
@@ -656,6 +665,7 @@ function PersonaPanel({
               <ClaimMapRow
                 key={c.claim_id}
                 claim={c.text}
+                category={c.category}
                 status={c.status}
                 score={c.nli_score}
                 citations={c.citations}
@@ -690,19 +700,30 @@ function PersonaPanel({
 
 function ClaimMapRow({
   claim,
+  category,
   status,
   score,
   citations,
   angle,
 }: {
   claim: string;
-  status: import("@/lib/types").ClaimStatus;
+  category: import("@/lib/types").StatementCategory;
+  status: import("@/lib/types").StatementSupportStatus;
   score: number | null;
   citations: { url: string; snippet: string }[];
   angle: string;
 }) {
   const [open, setOpen] = React.useState(false);
   const meta = ANGLE_META[angle as AngleType];
+  const categoryLabel: Record<
+    import("@/lib/types").StatementCategory,
+    string
+  > = {
+    target_fact: "target fact",
+    sender_or_value_prop: "sender / value prop",
+    generic_or_rhetorical: "generic",
+    cta: "CTA",
+  };
   return (
     <div className="rounded-lg border border-border/60 bg-claim">
       <button
@@ -713,11 +734,12 @@ function ClaimMapRow({
         <span
           className={cn(
             "mt-0.5 h-2 w-2 shrink-0 rounded-full",
-            status === "entailed" && "bg-[hsl(var(--success))]",
-            status === "neutral" && "bg-muted-foreground",
+            status === "supported" && "bg-[hsl(var(--success))]",
+            (status === "not_checkable" ||
+              status === "sender_context_not_verified") &&
+              "bg-muted-foreground",
             status === "contradicted" && "bg-destructive",
             status === "unsupported" && "bg-[hsl(var(--warning))]",
-            status === "repaired" && "bg-foreground/60",
           )}
         />
         <div className="min-w-0 flex-1">
@@ -731,16 +753,30 @@ function ClaimMapRow({
             )}
             <Badge
               variant={
-                status === "entailed"
+                category === "target_fact"
+                  ? "default"
+                  : category === "sender_or_value_prop"
+                    ? "secondary"
+                    : "outline"
+              }
+            >
+              {categoryLabel[category]}
+            </Badge>
+            <Badge
+              variant={
+                status === "supported"
                   ? "success"
                   : status === "contradicted"
                     ? "destructive"
-                    : status === "neutral"
+                    : status === "not_checkable" ||
+                        status === "sender_context_not_verified"
                       ? "muted"
                       : "warning"
               }
             >
-              {status}
+              {status === "sender_context_not_verified"
+                ? "sender context not verified"
+                : status}
               {score !== null && (
                 <span className="ml-1 font-mono text-[10px] opacity-70">
                   {score.toFixed(2)}
@@ -822,23 +858,61 @@ function EmailCard({
           {email.body}
         </pre>
         <div className="space-y-2 pt-2">
-          <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Claims ({email.claims.length})
-          </p>
-          {email.claims.length === 0 && (
-            <p className="text-xs text-muted-foreground">
-              No claims extracted from this draft.
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Body verification (
+              {email.safety?.statements.length ?? 0})
             </p>
-          )}
-          {email.claims.map((c: EmailClaim) => (
-            <ClaimEvidence
-              key={c.claim_id}
-              claim={c.text}
-              status={c.status}
-              score={c.nli_score}
-              evidenceIds={c.evidence_refs}
-              evidence={evidence}
-            />
+            {email.safety && (
+              <Badge
+                variant={
+                  email.safety.final_email_safe ? "success" : "destructive"
+                }
+                className="text-[10px]"
+              >
+                {email.safety.final_email_safe ? "safe" : "unsafe"}
+              </Badge>
+            )}
+            {email.safety && !email.safety.verification_ok && (
+              <Badge
+                variant="destructive"
+                className="text-[10px]"
+                title="Verifier LLM failed for at least one statement; cannot confirm safety."
+              >
+                verifier unavailable
+              </Badge>
+            )}
+            {email.safety?.email_regenerated && (
+              <Badge variant="outline" className="text-[10px]">
+                regenerated ×{email.safety.regeneration_count}
+              </Badge>
+            )}
+          </div>
+          {(email.safety?.statements ?? []).map((s) => {
+            const obsRefs = s.context_refs
+              .filter((r) => r.ref_type === "observation")
+              .map((r) => r.ref_id.replace(/^sender:/, ""));
+            return (
+              <div key={s.statement_id} className="space-y-1">
+                <ClaimEvidence
+                  claim={s.text}
+                  status={s.status}
+                  score={s.nli_score}
+                  evidenceIds={obsRefs}
+                  evidence={evidence}
+                />
+                {s.rationale && (
+                  <p className="text-xs text-muted-foreground pl-1">
+                    {s.rationale}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+          {email.safety?.failed_statements.map((t) => (
+            <p key={t} className="text-xs text-destructive">
+              Failed: {t}
+            </p>
           ))}
         </div>
       </CardContent>

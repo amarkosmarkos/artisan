@@ -13,7 +13,6 @@ import {
   TrendingUp,
   XOctagon,
   AlertTriangle,
-  Wrench,
   Lightbulb,
 } from "lucide-react";
 import {
@@ -31,9 +30,10 @@ import { SelectedValuePropositionCard } from "./selected-vp-card";
 import { cn } from "@/lib/utils";
 import type {
   Angle,
-  ClaimStatus,
   Email,
+  StatementSupportStatus,
   TargetResponse,
+  VerifiedStatement,
 } from "@/lib/types";
 
 interface Props {
@@ -83,7 +83,16 @@ export function StepOutreach({
       ids.push(...a.evidence_refs);
     }
     for (const e of result.emails) {
-      for (const c of e.claims) ids.push(...c.evidence_refs);
+      for (const s of e.safety?.statements ?? []) {
+        for (const ref of s.context_refs) {
+          if (
+            ref.ref_type === "observation" &&
+            (ref.ref_id.startsWith("obs_") || ref.ref_id.startsWith("sender:obs_"))
+          ) {
+            ids.push(ref.ref_id.replace(/^sender:/, ""));
+          }
+        }
+      }
     }
     if (result.selected_value_proposition) {
       ids.push(...result.selected_value_proposition.evidence_refs);
@@ -352,46 +361,7 @@ function EmailCard({
           {email.body}
         </pre>
 
-        <div className="border-t border-border/60 pt-4">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground mb-2">
-            Claims ({email.claims.length})
-          </p>
-          {email.claims.length === 0 ? (
-            <p className="text-xs italic text-muted-foreground">
-              No grounded claims. The writer fell back to a generic body.
-            </p>
-          ) : (
-            <ul className="space-y-2.5">
-              {email.claims.map((c) => (
-                <li
-                  key={c.claim_id}
-                  className="rounded-md border border-border/60 p-2.5"
-                >
-                  <div className="flex items-start gap-2">
-                    <ClaimStatusBadge status={c.status} score={c.nli_score} />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm leading-snug text-foreground/90">{c.text}</p>
-                      {c.repaired_text && (
-                        <p className="mt-1 text-xs text-muted-foreground italic">
-                          <Wrench className="inline h-3 w-3 mr-1" />
-                          repaired from previous version
-                        </p>
-                      )}
-                      <div className="mt-1.5">
-                        <ExpandableEvidence count={c.evidence_refs.length}>
-                          <EvidenceList
-                            evidenceRefs={c.evidence_refs}
-                            evidenceById={evidenceById}
-                          />
-                        </ExpandableEvidence>
-                      </div>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        <EmailSafetyPanel email={email} evidenceById={evidenceById} />
       </CardContent>
     </Card>
   );
@@ -406,8 +376,8 @@ type ClaimVariant =
   | "destructive"
   | "muted";
 
-const CLAIM_STATUS_META: Record<
-  ClaimStatus,
+const STATEMENT_STATUS_META: Record<
+  StatementSupportStatus,
   {
     label: string;
     variant: ClaimVariant;
@@ -415,51 +385,76 @@ const CLAIM_STATUS_META: Record<
     explain: string;
   }
 > = {
-  entailed: {
+  supported: {
     label: "supported",
     variant: "success",
     icon: <Check className="h-3 w-3" />,
-    explain:
-      "NLI entailed: the cited evidence directly supports this claim.",
+    explain: "Supported by available workflow context.",
   },
-  repaired: {
-    label: "repaired",
-    variant: "default",
-    icon: <Wrench className="h-3 w-3" />,
-    explain:
-      "Original draft was unsupported; the writer rewrote the sentence to match available evidence.",
-  },
-  neutral: {
-    label: "neutral",
+  not_checkable: {
+    label: "not checkable",
     variant: "muted",
     icon: <AlertTriangle className="h-3 w-3" />,
-    explain:
-      "NLI neutral: the evidence neither implies nor contradicts the claim. Treat as weak support.",
+    explain: "Rhetorical or non-factual; not verified as a fact claim.",
   },
   unsupported: {
     label: "unsupported",
     variant: "warning",
     icon: <AlertTriangle className="h-3 w-3" />,
-    explain:
-      "No grounded evidence was found for this claim. Verify before sending.",
+    explain: "Not supported by available context.",
   },
   contradicted: {
     label: "contradicted",
     variant: "destructive",
     icon: <XOctagon className="h-3 w-3" />,
+    explain: "Contradicted by available context.",
+  },
+  sender_context_not_verified: {
+    label: "sender context not verified",
+    variant: "muted",
+    icon: <AlertTriangle className="h-3 w-3" />,
     explain:
-      "NLI contradicted: the evidence directly contradicts the claim. Do not send as-is.",
+      "Sender / value-prop positioning; no sender context available to verify. Not a safety failure.",
   },
 };
 
-function ClaimStatusBadge({
+const CATEGORY_META: Record<
+  import("@/lib/types").StatementCategory,
+  { label: string; variant: ClaimVariant; explain: string }
+> = {
+  target_fact: {
+    label: "target fact",
+    variant: "default",
+    explain:
+      "Assertion about the recipient company. Safety-critical: an unsupported target fact marks the email unsafe.",
+  },
+  sender_or_value_prop: {
+    label: "sender / value prop",
+    variant: "secondary",
+    explain:
+      "Assertion about the sender / its product / value proposition. Informational; never marks the email unsafe.",
+  },
+  generic_or_rhetorical: {
+    label: "generic",
+    variant: "outline",
+    explain:
+      "Generic commercial language with no concrete fact. Never a safety failure.",
+  },
+  cta: {
+    label: "CTA",
+    variant: "outline",
+    explain: "Greeting, sign-off, or meeting-ask. Never a safety failure.",
+  },
+};
+
+function StatementStatusBadge({
   status,
   score,
 }: {
-  status: ClaimStatus;
+  status: StatementSupportStatus;
   score: number | null;
 }) {
-  const m = CLAIM_STATUS_META[status];
+  const m = STATEMENT_STATUS_META[status];
   return (
     <Badge variant={m.variant} className="shrink-0" title={m.explain}>
       {m.icon}
@@ -470,6 +465,175 @@ function ClaimStatusBadge({
         </span>
       )}
     </Badge>
+  );
+}
+
+function StatementCategoryBadge({
+  category,
+}: {
+  category: import("@/lib/types").StatementCategory;
+}) {
+  const m = CATEGORY_META[category];
+  return (
+    <Badge variant={m.variant} className="shrink-0" title={m.explain}>
+      {m.label}
+    </Badge>
+  );
+}
+
+function EmailSafetyPanel({
+  email,
+  evidenceById,
+}: {
+  email: Email;
+  evidenceById: Map<string, import("@/lib/api").EvidenceRecord>;
+}) {
+  const safety = email.safety;
+  const statements = safety?.statements ?? [];
+
+  return (
+    <div className="border-t border-border/60 pt-4 space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Body verification
+        </p>
+        {safety && (
+          <>
+            <Badge
+              variant={safety.final_email_safe ? "success" : "destructive"}
+              className="text-[10px]"
+            >
+              {safety.final_email_safe ? "safe" : "unsafe"}
+            </Badge>
+            {!safety.verification_ok && (
+              <Badge
+                variant="destructive"
+                className="text-[10px]"
+                title="The verifier LLM call failed for at least one statement, so the email cannot be confirmed as safe."
+              >
+                verifier unavailable
+              </Badge>
+            )}
+            {safety.email_regenerated && (
+              <Badge variant="outline" className="text-[10px]">
+                regenerated ×{safety.regeneration_count}
+              </Badge>
+            )}
+          </>
+        )}
+      </div>
+
+      {!safety ? (
+        <p className="text-xs italic text-muted-foreground">
+          Verification not run yet.
+        </p>
+      ) : statements.length === 0 ? (
+        <p className="text-xs italic text-muted-foreground">
+          No checkable factual statements extracted from this body.
+        </p>
+      ) : (
+        <ul className="space-y-2.5">
+          {statements.map((s) => (
+            <StatementRow
+              key={s.statement_id}
+              statement={s}
+              evidenceById={evidenceById}
+            />
+          ))}
+        </ul>
+      )}
+
+      {safety && safety.failed_statements.length > 0 && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 p-2.5">
+          <p className="text-xs font-medium text-destructive mb-1">
+            Failed statements
+          </p>
+          <ul className="text-xs text-destructive/90 space-y-1">
+            {safety.failed_statements.map((t) => (
+              <li key={t}>· {t}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function isVerifierErrorRationale(rationale: string): boolean {
+  const r = rationale.toLowerCase();
+  return (
+    r.includes("verification_failed") ||
+    r.includes("verifier unavailable") ||
+    r.includes("nli verifier unavailable")
+  );
+}
+
+function StatementRow({
+  statement,
+  evidenceById,
+}: {
+  statement: VerifiedStatement;
+  evidenceById: Map<string, import("@/lib/api").EvidenceRecord>;
+}) {
+  const obsRefs = statement.context_refs
+    .filter((r) => r.ref_type === "observation")
+    .map((r) => r.ref_id.replace(/^sender:/, ""));
+
+  return (
+    <li className="rounded-md border border-border/60 p-2.5 list-none">
+      <div className="flex items-start gap-2">
+        <div className="flex flex-col items-start gap-1 shrink-0">
+          <StatementCategoryBadge category={statement.category} />
+          <StatementStatusBadge
+            status={statement.status}
+            score={statement.nli_score}
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm leading-snug text-foreground/90">
+            {statement.text}
+          </p>
+          {statement.rationale && (
+            <p
+              className={cn(
+                "mt-1 text-xs",
+                isVerifierErrorRationale(statement.rationale)
+                  ? "text-destructive"
+                  : "text-muted-foreground",
+              )}
+            >
+              {statement.rationale}
+            </p>
+          )}
+          {statement.context_refs.length > 0 && (
+            <div className="mt-2 space-y-1">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                Context used
+              </p>
+              {statement.context_refs.map((ref) => (
+                <p
+                  key={ref.ref_id}
+                  className="text-xs text-muted-foreground line-clamp-2"
+                >
+                  <span className="font-mono text-[10px]">{ref.ref_id}</span>
+                  {ref.label ? ` · ${ref.label}` : ""}: {ref.snippet}
+                </p>
+              ))}
+            </div>
+          )}
+          {obsRefs.length > 0 && (
+            <div className="mt-1.5">
+              <ExpandableEvidence count={obsRefs.length}>
+                <EvidenceList
+                  evidenceRefs={obsRefs}
+                  evidenceById={evidenceById}
+                />
+              </ExpandableEvidence>
+            </div>
+          )}
+        </div>
+      </div>
+    </li>
   );
 }
 

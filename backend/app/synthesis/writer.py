@@ -2,17 +2,10 @@
 
 Each outreach angle gets its own LLM call. The writer sees the selected sender
 value proposition, ICP, persona guidance, the single angle to write, and the
-retrieved target observations. It can decline an angle if the retrieved facts
-do not support a credible sales email.
+retrieved target observations.
 
-Inputs:
-- value proposition (sender)
-- ICP summary       (sender)
-- validated target observations
-- strategy artifact (fit + angles + persona alignment)
-- persona
-
-Raw website text is never passed to the writer.
+Safety verification runs later in ``email_guard`` on the final subject/body.
+The writer must not emit claims or evidence refs.
 """
 from __future__ import annotations
 
@@ -25,9 +18,7 @@ from ..config import settings
 from ..schemas import (
     Angle,
     AngleType,
-    ClaimStatus,
     Email,
-    EmailClaim,
     ICP,
     Observation,
     PersonaInput,
@@ -39,84 +30,132 @@ from ..services.llm import LLMClient, UsageAccumulator
 log = logging.getLogger(__name__)
 
 
-# ---------- Per-angle email writer ----------
-
-class _ClaimDraft(BaseModel):
-    text: str = Field(min_length=4, max_length=400)
-    evidence_refs: list[str] = Field(min_length=1, max_length=4)
-
-
 class _EmailDraft(BaseModel):
-    # Backward-compatible with previous prompt/schema. The writer no longer
-    # honors refusals, but accepting these fields prevents old model behavior
-    # from breaking structured parsing when it emits them.
     should_write: bool = True
     skip_reason: str = ""
     subject: str = Field(default="", max_length=180)
     body: str = Field(default="", max_length=2200)
-    claims: list[_ClaimDraft] = Field(default_factory=list, max_length=6)
 
 
 _WRITER_SYSTEM = """You are an expert B2B outbound sales writer.
 
-INPUTS:
-- Sender value proposition + ICP: what the sender can credibly offer.
-- Persona: who the email is addressed to and how they likely think.
-- Strategy angle: the intended framing for THIS one email.
-- Retrieved target observations: the only target-specific facts you may use.
+INPUTS YOU RECEIVE:
+- TARGET COMPANY NAME: the recipient's company.
+- RECIPIENT NAME: optional first name for the greeting.
+- SENDER VALUE PROPOSITION (label, customer, pain, outcome, mechanism).
+- SENDER EVIDENCE: real facts about the sender's product, customers, results,
+  or mechanism.
+- STRATEGY ANGLE FOR THIS EMAIL: the sales angle (pain_led / trigger_led /
+  etc), its hypothesis, and the target observations that ground it.
+- ADDITIONAL TARGET OBSERVATIONS: extra facts about the target.
+- PERSONA: seniority, role, and messaging guidance for the recipient.
+- MESSAGING ANGLE / SELECTED VP REASON: why this angle and VP were chosen.
 
 YOUR JOB:
-Always write one high-quality, credible sales email for the given angle, even
-when fit_assessment is weak/none or contact_decision is skip. Those fields are
-diagnostic context, not permission to refuse. Use the retrieved target
-observations to make the email specific when they help. You may connect those
-facts to the sender value proposition, but never invent facts about the target,
-their priorities, their pain, their tech stack, their projects, or their intent.
+Write ONE send-ready sales email built around a clear commercial story.
+The output must be complete plain text — no placeholders, no brackets, no
+fields left for the sender to fill in.
+Do this even when fit_assessment is weak or contact_decision is skip; those
+are diagnostic, not permission to refuse.
 
-If the retrieved observations are thin or the fit is poor, still write the
-email, but make it conservative: use softer language, avoid overstating pain,
-and position the note as exploratory rather than claiming clear need.
+REASONING ORDER (follow before writing):
+1. IDENTIFY THE SALES ANGLE — the main reason this target might care now.
+   Read STRATEGY ANGLE, MESSAGING ANGLE, and SELECTED VP REASON. The angle is
+   a concrete commercial problem or opportunity, not a generic category.
+   Examples: reducing inference cost, improving deployment efficiency,
+   lowering compute footprint, compressing large models, scaling AI systems
+   more economically, improving model serving economics.
+2. CONNECT THE VALUE PROPOSITION TO THAT ANGLE — explain why the selected
+   VP resolves or advances that specific problem for this target. Do NOT
+   describe the sender company in the abstract. Show the implication for
+   the target's business or technical situation.
+3. SELECT ONLY THE STRONGEST SUPPORTING CONTEXT — pick one or two facts
+   (target observation, sender evidence, persona detail) that best prove the
+   angle. Ignore everything else, even if it appears in the input.
+4. BUILD ONE COHERENT NARRATIVE:
+   (a) target context or market reality
+   (b) why that creates a relevant business/technical problem
+   (c) how the selected value proposition maps to that problem
+   (d) simple, low-friction CTA
+
+The email must persuade, not inform. Every sentence must advance the story.
+Never list loosely connected facts.
+
+HIRING AS TRIGGER (RESTRICTED):
+Do NOT use hiring, headcount growth, or "as you expand your workforce" unless
+hiring is genuinely the core sales angle AND directly tied to the selected VP
+(e.g. team growth, implementation capacity, organizational scaling).
+For technical AI infrastructure value propositions, prefer stronger angles:
+compute cost, inference efficiency, deployment complexity, latency, scale,
+model performance, serving economics.
+If a hiring observation exists but a stronger technical or economic angle is
+available, use the stronger angle and ignore the hiring signal.
+
+BANNED / STRONGLY DISCOURAGED LANGUAGE:
+Never use these or close variants:
+- "AI solutions"
+- "align with your objectives" / "align with your goals"
+- "enhance operational efficiency"
+- "explore this further"
+- "organizations looking to implement AI effectively"
+- "I hope this message finds you well"
+- "I would be happy to share more"
+- "Would a short conversation be useful?"
+- "Let me know your thoughts"
+- "as you expand your workforce" (unless hiring is the core angle)
+Write in plain, direct language. No corporate filler. No exaggerated claims.
+
+NO PLACEHOLDERS (HARD):
+The email must be ready to send as-is. Never output bracket placeholders such
+as [First Name], [Target Company], [Your Name], [Your Title], [Your Contact
+Information], or any similar token.
+- If RECIPIENT NAME is present, open with "Hi <name>,".
+- If RECIPIENT NAME is empty or "(none)", open with exactly "Hi,".
+- If TARGET COMPANY NAME is known, refer to the company by that name.
+- If a value is unknown, omit it naturally — do not substitute a placeholder.
+
+EVIDENCE DISCIPLINE (HARD):
+- Target-specific factual claims must come from provided target observations.
+  Never invent the target's needs, plans, tech stack, customers, hiring, or
+  intent.
+- Sender-specific facts (numbers, named methods, customers, outcomes) must
+  come from SENDER EVIDENCE. Do not invent metrics or capabilities.
+- If evidence is weak, use a general but relevant market-level statement
+  instead of inventing specificity.
+
+PREFERRED STRUCTURE:
+Subject: name the specific commercial angle — not a generic benefit.
+
+Opening (1-2 sentences):
+One strong target-relevant context or market reality tied to the sales angle.
+
+Middle (1-2 sentences):
+Connect the selected value proposition to a concrete implication for the
+target. Use sender evidence only where it sharpens credibility.
+
+CTA (1 sentence):
+Ask for a low-friction next step — a short call, a reply, or a forward.
+
+WRITING STYLE:
+- Plain text. 90-130 words. 2-4 short paragraphs.
+- Commercial clarity over completeness. Sharp, not safe-and-vague.
+- Senior personas (VP, C-level, Founder): lead with business outcome
+  (cost, revenue, speed, risk). Mechanism only as a brief hook.
+- IC / Manager / Director: operational detail and mechanism are fair game.
+
+OPTIMIZE FOR:
+commercial clarity, coherent story, selected sales angle, selected value
+proposition, evidence-grounded personalization, readiness to send.
 
 OUTPUT (strict JSON):
 {
   "subject": "...",
-  "body": "...",
-  "claims": [
-    { "text": "...", "evidence_refs": ["obs_xxx"] }
-  ]
+  "body": "..."
 }
-
-SALES WRITING GUIDANCE:
-- Sound like a sharp human seller, not a template. Plain text, natural tone.
-- Structure the email with 2-4 short paragraphs:
-  1. Open with the most relevant retrieved target fact or trigger.
-  2. Explain why that fact might matter to this persona.
-  3. Connect the sender's value proposition to a plausible business outcome.
-  4. End with a low-friction CTA.
-- Be concise: usually 90-160 words. More is not better.
-- Prefer business outcomes for senior personas; use operational detail only when
-  the persona is closer to execution.
-- Use the strategy angle as direction, not a script. If the angle is weak,
-  adapt it into a credible exploratory note instead of refusing.
-- Use retrieved facts where they strengthen relevance. You do not need to use
-  every observation. Skip noisy or irrelevant facts.
-- Generic sender-side positioning is allowed, but target-specific statements
-  must be grounded in retrieved observations.
-- If no retrieved target fact is worth using, write a broader but still useful
-  email based on sender value proposition + persona context. In that case,
-  claims may be empty.
-
-EVIDENCE / CLAIM RULES:
-- For every target-specific factual statement you make, add one claim with the
-  exact observation_id(s) that support it.
-- Claim `text` should be a concise sentence or clause that appears in the body,
-  or is a very close substring of a sentence in the body.
-- Use only observation_ids from the retrieved observations. Never invent ids.
-- Do not cite sender-side value proposition statements as claims; claims are
-  for target-specific facts only.
-- Never say the target "needs", "wants", "is looking for", "is struggling with",
-  or "is prioritizing" something unless a retrieved observation says that.
 """
+
+
+_MAX_SENDER_EVIDENCE_ITEMS = 12
 
 
 def _format_icp(icp: ICP) -> str:
@@ -138,7 +177,9 @@ def _format_obs_for_writer(obs: list[Observation]) -> str:
 
 def _persona_block(strategy: StrategyArtifact, persona: PersonaInput) -> str:
     pa = strategy.strategy.persona_alignment
+    name = (persona.name or "").strip() or "(none)"
     return (
+        f"name: {name}\n"
         f"role: {persona.role}\n"
         f"seniority: {persona.seniority.value}\n"
         f"role_relevance: {pa.role_relevance}\n"
@@ -147,11 +188,60 @@ def _persona_block(strategy: StrategyArtifact, persona: PersonaInput) -> str:
     )
 
 
-def _format_angle(angle: Angle) -> str:
+def _format_angle(
+    angle: Angle, observations_by_id: dict[str, Observation]
+) -> str:
+    grounding_lines = []
+    for ref in angle.evidence_refs:
+        ob = observations_by_id.get(ref)
+        if ob:
+            grounding_lines.append(f"  - {ref} [{ob.kind}]: {ob.text}")
+    grounding = (
+        "\n".join(grounding_lines)
+        if grounding_lines
+        else "  (no concrete observation tied to this angle; keep tone exploratory)"
+    )
     return (
         f"type: {angle.type.value}\n"
         f"hypothesis: {angle.hypothesis}\n"
-        f"evidence_refs_from_strategy: {angle.evidence_refs}"
+        "angle_grounding_observations:\n"
+        f"{grounding}"
+    )
+
+
+def _select_sender_evidence(
+    sender_vp: ValueProposition,
+    sender_observations: list[Observation],
+) -> list[Observation]:
+    """Surface the sender observations the writer actually needs.
+
+    Priority order:
+      1. Observations explicitly cited by the selected VP.
+      2. Other sender observations, by descending confidence, capped at
+         ``_MAX_SENDER_EVIDENCE_ITEMS``.
+    """
+    by_id = {o.observation_id: o for o in sender_observations}
+    pinned: list[Observation] = []
+    seen: set[str] = set()
+    for ref in sender_vp.evidence_refs:
+        ob = by_id.get(ref)
+        if ob and ob.observation_id not in seen:
+            pinned.append(ob)
+            seen.add(ob.observation_id)
+    remaining = [
+        o for o in sender_observations if o.observation_id not in seen
+    ]
+    remaining.sort(key=lambda o: o.confidence, reverse=True)
+    extra = remaining[: max(0, _MAX_SENDER_EVIDENCE_ITEMS - len(pinned))]
+    return pinned + extra
+
+
+def _format_sender_evidence(obs: list[Observation]) -> str:
+    if not obs:
+        return "(no sender evidence available)"
+    return "\n".join(
+        f"- {o.observation_id} [{o.kind}, conf={o.confidence:.2f}]: {o.text}"
+        for o in obs
     )
 
 
@@ -191,24 +281,32 @@ def _write_email_for_angle(
     angle: Angle,
     sender_vp: ValueProposition,
     sender_icp: ICP,
+    target_company_name: str,
     target_observations: list[Observation],
+    sender_evidence: list[Observation],
     strategy: StrategyArtifact,
     persona: PersonaInput,
     llm: LLMClient,
     usage: UsageAccumulator,
 ) -> _EmailDraft | None:
-    """Produce one email for one strategy angle in an independent LLM call."""
+    observations_by_id = {o.observation_id: o for o in target_observations}
+    company_name = (target_company_name or "").strip() or "(unknown)"
+    recipient_name = (persona.name or "").strip() or "(none)"
     user = (
+        f"TARGET COMPANY NAME: {company_name}\n"
+        f"RECIPIENT NAME: {recipient_name}\n\n"
         "SENDER VALUE PROPOSITION:\n"
         f"- label:     {sender_vp.label}\n"
         f"- customer:  {sender_vp.customer}\n"
         f"- pain:      {sender_vp.pain}\n"
         f"- outcome:   {sender_vp.outcome}\n"
         f"- mechanism: {sender_vp.mechanism}\n\n"
-        f"SENDER ICP (summary): {_format_icp(sender_icp)}\n\n"
+        "SENDER EVIDENCE (use for specific sender claims):\n"
+        + _format_sender_evidence(sender_evidence)
+        + f"\n\nSENDER ICP (summary): {_format_icp(sender_icp)}\n\n"
         "STRATEGY ANGLE FOR THIS EMAIL:\n"
-        + _format_angle(angle)
-        + "\n\nRETRIEVED TARGET OBSERVATIONS:\n"
+        + _format_angle(angle, observations_by_id)
+        + "\n\nADDITIONAL TARGET OBSERVATIONS:\n"
         + _format_obs_for_writer(target_observations)
         + "\n\nFIT ASSESSMENT: "
         + strategy.fit_assessment.level.value
@@ -242,26 +340,34 @@ def _fallback_email_draft(
     angle: Angle,
     sender_vp: ValueProposition,
     persona: PersonaInput,
+    target_company_name: str,
 ) -> _EmailDraft:
-    """Last-resort email when the writer model fails.
-
-    Keeps the promise that the product always returns an email while avoiding
-    any target-specific claims that would require evidence.
-    """
     outcome = sender_vp.outcome.strip() or "improve business outcomes"
     mechanism = sender_vp.mechanism.strip() or "the team's approach"
     customer = sender_vp.customer.strip() or "teams"
     label = sender_vp.label.strip() or "your work"
-    subject = f"Exploring {label}"
-    body = (
-        f"I wanted to reach out because your role as {persona.role} may touch "
-        f"areas where {customer} evaluate ways to {outcome}.\n\n"
-        f"The reason I thought it could be relevant is that {mechanism}. I do "
-        "not want to assume this is a current priority on your side, but it "
-        "may be worth comparing notes if this area is on the roadmap.\n\n"
-        "Would a short conversation be useful?"
+    company = (target_company_name or "").strip()
+    greeting_name = (persona.name or "").strip()
+    greeting = f"Hi {greeting_name}," if greeting_name else "Hi,"
+    company_phrase = f"the team at {company}" if company else "your team"
+    subject = (
+        f"Exploring {label} with {company}".strip()
+        if company
+        else f"Exploring {label}"
     )
-    return _EmailDraft(subject=subject, body=body, claims=[])
+    body = (
+        f"{greeting}\n\n"
+        f"I wanted to reach out because your role as {persona.role} at "
+        f"{company_phrase} may touch areas where {customer} evaluate ways "
+        f"to {outcome}.\n\n"
+        f"The reason I thought it could be relevant is that {mechanism}. I "
+        "do not want to assume this is a current priority on your side, "
+        "but it may be worth comparing notes if this area is on the "
+        "roadmap.\n\n"
+        "Worth a 15-minute call next week, or should I send a 1-page "
+        "teardown first?"
+    )
+    return _EmailDraft(subject=subject, body=body)
 
 
 def write_emails(
@@ -269,16 +375,16 @@ def write_emails(
     sender_vp: ValueProposition,
     sender_icp: ICP,
     target_observations: list[Observation],
+    sender_observations: list[Observation] | None = None,
+    target_company_name: str = "",
     strategy: StrategyArtifact,
     persona: PersonaInput,
     llm: LLMClient,
     usage: UsageAccumulator,
 ) -> list[Email]:
-    valid_obs_ids: set[str] = {o.observation_id for o in target_observations}
-    obs_lookup: dict[str, Observation] = {
-        o.observation_id: o for o in target_observations
-    }
-
+    sender_evidence = _select_sender_evidence(
+        sender_vp, sender_observations or []
+    )
     def build(angle: Angle, d: _EmailDraft) -> Email | None:
         if not d.should_write:
             log.info(
@@ -287,7 +393,10 @@ def write_emails(
                 d.skip_reason[:160],
             )
             d = _fallback_email_draft(
-                angle=angle, sender_vp=sender_vp, persona=persona
+                angle=angle,
+                sender_vp=sender_vp,
+                persona=persona,
+                target_company_name=target_company_name,
             )
         if not d.subject.strip() or not d.body.strip():
             log.info(
@@ -295,54 +404,16 @@ def write_emails(
                 angle.type.value,
             )
             d = _fallback_email_draft(
-                angle=angle, sender_vp=sender_vp, persona=persona
+                angle=angle,
+                sender_vp=sender_vp,
+                persona=persona,
+                target_company_name=target_company_name,
             )
-        email_id = f"email_{uuid.uuid4().hex[:10]}"
-        claims: list[EmailClaim] = []
-        for c in d.claims:
-            # Keep only refs the system actually knows; reject hallucinated ids.
-            refs = [r for r in c.evidence_refs if r in valid_obs_ids]
-            if not refs:
-                continue
-            claims.append(
-                EmailClaim(
-                    claim_id=f"claim_{uuid.uuid4().hex[:10]}",
-                    text=c.text.strip(),
-                    evidence_refs=refs,
-                    status=ClaimStatus.UNSUPPORTED,  # set by verifier
-                )
-            )
-
-        # Safety net: if the model wrote target-specific prose but forgot valid
-        # claims, recover only when an observation text visibly appears in the
-        # body. If nothing matches, still keep the email: the prompt allows a
-        # broader sender/persona-based note with zero target-specific claims.
-        if not claims:
-            body_l = d.body.lower()
-            for obs in obs_lookup.values():
-                obs_l = obs.text.lower().strip()
-                prefix = ""
-                for cut in range(min(len(obs_l), 80), 19, -10):
-                    candidate = obs_l[:cut].rstrip(" .,;:")
-                    if candidate and candidate in body_l:
-                        prefix = candidate
-                        break
-                if prefix:
-                    claims.append(
-                        EmailClaim(
-                            claim_id=f"claim_{uuid.uuid4().hex[:10]}",
-                            text=prefix,
-                            evidence_refs=[obs.observation_id],
-                            status=ClaimStatus.UNSUPPORTED,
-                        )
-                    )
-
         return Email(
-            email_id=email_id,
+            email_id=f"email_{uuid.uuid4().hex[:10]}",
             angle=angle.type,
             subject=d.subject.strip(),
             body=d.body.strip(),
-            claims=claims,
         )
 
     angles = _angles_for_writer(strategy)
@@ -352,7 +423,9 @@ def write_emails(
             angle=angle,
             sender_vp=sender_vp,
             sender_icp=sender_icp,
+            target_company_name=target_company_name,
             target_observations=target_observations,
+            sender_evidence=sender_evidence,
             strategy=strategy,
             persona=persona,
             llm=llm,
@@ -360,7 +433,10 @@ def write_emails(
         )
         if draft is None:
             draft = _fallback_email_draft(
-                angle=angle, sender_vp=sender_vp, persona=persona
+                angle=angle,
+                sender_vp=sender_vp,
+                persona=persona,
+                target_company_name=target_company_name,
             )
         email = build(angle, draft)
         if email:

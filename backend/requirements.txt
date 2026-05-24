@@ -8,7 +8,8 @@ langgraph==0.2.50
 instructor==1.6.4
 # openai 1.55 fixed the legacy `proxies=` kwarg, so we no longer need to pin
 # httpx<0.28 against the older Azure client.
-openai==1.57.0
+# Responses API (web_search for target discovery) requires openai>=1.66.0.
+openai==1.74.1
 httpx==0.27.2
 
 # --- Crawling (lean stack, no LLM transitive deps) ---

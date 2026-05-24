@@ -3,6 +3,7 @@ import type {
   PersonaInput,
   ProgressEvent,
   SenderResponse,
+  SuggestedTargetsResponse,
   TargetResponse,
   ValueProposition,
   StrategyArtifact,
@@ -261,6 +262,15 @@ export async function removeSenderTarget(
   });
 }
 
+export async function discoverSenderTargets(
+  senderCompanyId: string,
+): Promise<SuggestedTargetsResponse> {
+  return jsonFetch(`/senders/${senderCompanyId}/discover-targets`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 export async function listPersonas(
   targetCompanyId: string,
 ): Promise<{ personas: PersonaRow[] }> {
@@ -433,9 +443,7 @@ export function streamProgress(
     "icp_pass1", "planner", "planner_done", "fetch_more", "icp", "vp",
     "strategy", "strategy_done",
     "write_emails", "write_emails_done",
-    "claim_extract", "claim_extract_done",
-    "verify", "verify_progress", "verify_done",
-    "repair", "repair_progress", "repair_done",
+    "email_guard", "email_guard_progress", "email_guard_done",
     "angle_overlap", "angle_overlap_repair", "angle_overlap_done",
     "web_search", "web_search_done",
     "extract_ws", "done",
