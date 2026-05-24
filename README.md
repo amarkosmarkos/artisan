@@ -69,6 +69,8 @@ After sender research completes, the workflow moves to target selection. Two pat
 - **Suggested targets** — the backend runs a bounded web search against the sender ICP/VP and returns up to 3 candidate companies, each with up to 2 suggested personas. Suggestions are **opt-in**: saving or evaluating a target is an explicit user action. Nothing auto-starts downstream analysis.
 - **Manual target** — enter any target URL, role, and seniority directly (e.g. `volotea.com`, VP of Sales) and kick off evaluation yourself.
 
+![Pick a target — suggested companies with personas, or add a custom target manually](docs/images/pick_target.png)
+
 Both paths converge on the same target pipeline.
 
 ---
