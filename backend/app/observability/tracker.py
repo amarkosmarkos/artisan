@@ -120,26 +120,6 @@ class RunTracker:
             m.observation_validation_rate = round(
                 m.observations_validated / m.observations_extracted, 3
             )
-        checkable = (
-            m.supported_statements_count
-            + m.unsupported_statements_count
-            + m.contradicted_statements_count
-        )
-        if checkable > 0:
-            m.evidence_support_rate = round(
-                m.supported_statements_count / checkable, 3
-            )
-        if m.extracted_statements_count > 0:
-            m.unsupported_claim_rate = round(
-                m.unsupported_statements_count / m.extracted_statements_count,
-                3,
-            )
-        if m.claims_total > 0:
-            m.claim_support_rate = round(m.claims_supported / m.claims_total, 3)
-            if m.unsupported_claim_rate is None:
-                m.unsupported_claim_rate = round(
-                    m.claims_unsupported / m.claims_total, 3
-                )
         if m.raw_cleaned_chars > 0 and m.evidence_chars_used > 0:
             m.compression_ratio = round(
                 m.raw_cleaned_chars / m.evidence_chars_used, 3
@@ -208,24 +188,21 @@ class RunTracker:
             "compression_ratio": m.compression_ratio,
             "raw_cleaned_chars": m.raw_cleaned_chars,
             "evidence_chars_used": m.evidence_chars_used,
-            "extracted_statements_count": m.extracted_statements_count,
-            "supported_statements_count": m.supported_statements_count,
-            "unsupported_statements_count": m.unsupported_statements_count,
-            "contradicted_statements_count": m.contradicted_statements_count,
-            "not_checkable_statements_count": m.not_checkable_statements_count,
-            "evidence_support_rate": m.evidence_support_rate or 0.0,
+            "declared_claims_count": m.declared_claims_count,
+            "email_claims_count": m.email_claims_count,
+            "unsupported_claims_count": m.unsupported_claims_count,
+            "safety_confidence_avg": (
+                m.safety_confidence_avg
+                if m.safety_confidence_avg is not None
+                else -1.0
+            ),
             "email_regenerated": int(m.email_regenerated),
             "regeneration_count": m.regeneration_count,
+            "emails_safe_count": m.emails_safe_count,
+            "emails_total": m.emails_total,
             "final_email_safe": int(m.final_email_safe),
             "verification_ok": int(m.verification_ok),
-            "failed_statements_count": len(m.failed_statements),
-            "claims_total": m.claims_total,
-            "claims_supported": m.claims_supported,
-            "claims_unsupported": m.claims_unsupported,
-            "claims_contradicted": m.claims_contradicted,
             "angle_overlap": m.angle_overlap if m.angle_overlap is not None else -1.0,
-            "claim_support_rate": m.claim_support_rate or 0.0,
-            "unsupported_claim_rate": m.unsupported_claim_rate or 0.0,
             "observation_validation_rate": m.observation_validation_rate or 0.0,
         }
         for k, v in scalars.items():

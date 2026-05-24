@@ -8,10 +8,7 @@ import {
   BarChart3,
   Check,
   Copy,
-  Flame,
   ShieldAlert,
-  TrendingUp,
-  XOctagon,
   AlertTriangle,
   Lightbulb,
 } from "lucide-react";
@@ -27,14 +24,15 @@ import { Button } from "@/components/ui/button";
 import { useEvidenceLookup } from "@/components/claim-evidence";
 import { EvidenceList, ExpandableEvidence } from "./evidence-popover";
 import { SelectedValuePropositionCard } from "./selected-vp-card";
+import { SectionHeading } from "@/components/section-heading";
+import { getAngleMeta } from "@/lib/angle-meta";
 import { cn } from "@/lib/utils";
 import type {
   Angle,
   Email,
-  StatementSupportStatus,
   TargetResponse,
-  VerifiedStatement,
 } from "@/lib/types";
+import { EmailClaimsPanel } from "@/components/email-claims-panel";
 
 interface Props {
   result: TargetResponse;
@@ -83,13 +81,12 @@ export function StepOutreach({
       ids.push(...a.evidence_refs);
     }
     for (const e of result.emails) {
-      for (const s of e.safety?.statements ?? []) {
-        for (const ref of s.context_refs) {
-          if (
-            ref.ref_type === "observation" &&
-            (ref.ref_id.startsWith("obs_") || ref.ref_id.startsWith("sender:obs_"))
-          ) {
-            ids.push(ref.ref_id.replace(/^sender:/, ""));
+      for (const c of e.claims ?? []) {
+        for (const ref of c.evidence_refs ?? []) {
+          if (ref.startsWith("obs_")) {
+            ids.push(ref);
+          } else if (ref.startsWith("sender:obs_")) {
+            ids.push(ref.slice("sender:".length));
           }
         }
       }
@@ -140,12 +137,22 @@ export function StepOutreach({
         />
       </div>
 
+      <div className="mb-8">
+        <SectionHeading
+          level="section"
+          title="Fit & strategy"
+          description="Assessment, persona alignment, and recommended angles before the final copy."
+        />
+      </div>
+
       <div className="grid gap-6 md:grid-cols-3">
         <Card className="md:col-span-2">
           <CardHeader>
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
-                <CardTitle className="text-base">Fit assessment</CardTitle>
+                <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                  Fit assessment
+                </CardTitle>
                 <CardDescription>
                   {result.persona.role} ({result.persona.seniority})
                 </CardDescription>
@@ -191,7 +198,9 @@ export function StepOutreach({
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Persona alignment</CardTitle>
+            <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+              Persona alignment
+            </CardTitle>
             <CardDescription>How the angle is framed</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4 text-sm">
@@ -237,33 +246,40 @@ export function StepOutreach({
       </div>
 
       {angles.length > 0 && (
-        <div className="mt-6">
+        <div className="mt-10">
           <StrategyAnglesPanel angles={angles} evidenceById={evidenceById} />
         </div>
       )}
 
-      <div className="mt-6 grid gap-6 md:grid-cols-2">
-        {emails.map((email) => (
-          <EmailCard
-            key={email.email_id}
-            email={email}
-            evidenceById={evidenceById}
-          />
-        ))}
+      <div className="mt-12 space-y-6">
+        <SectionHeading
+          level="page"
+          title="Generated emails"
+          description="Final outreach copy — ready to review, copy, and send."
+        />
+        {emails.length > 0 ? (
+          <div className="space-y-8">
+            {emails.map((email) => (
+              <EmailCard
+                key={email.email_id}
+                email={email}
+                evidenceById={evidenceById}
+              />
+            ))}
+          </div>
+        ) : (
+          <Card className="border-dashed">
+            <CardContent className="py-10 text-center">
+              <Lightbulb className="h-5 w-5 mx-auto mb-2 text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">
+                No emails were generated. The system refused to write outbound
+                copy because the target evidence was insufficient to support
+                concrete claims.
+              </p>
+            </CardContent>
+          </Card>
+        )}
       </div>
-
-      {emails.length === 0 && (
-        <Card className="mt-6 border-dashed">
-          <CardContent className="py-8 text-center">
-            <Lightbulb className="h-5 w-5 mx-auto mb-2 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">
-              No emails were generated. The system refused to write outbound
-              copy because the target evidence was insufficient to support
-              concrete claims.
-            </p>
-          </CardContent>
-        </Card>
-      )}
     </motion.div>
   );
 }
@@ -278,21 +294,23 @@ function StrategyAnglesPanel({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">Strategy angles</CardTitle>
+        <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+          Strategy angles
+        </CardTitle>
         <CardDescription>
           Hypotheses that drive each email. Evidence is on the right.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {angles.map((a) => {
-          const meta = ANGLE_META[a.type] ?? ANGLE_META.pain_led;
+          const meta = getAngleMeta(a.type);
           return (
             <div
               key={a.type}
               className="rounded-md border border-border/60 p-3"
             >
               <div className="flex items-start justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
+                <div className={cn("flex items-center gap-2 text-xs uppercase tracking-wide font-medium", meta.tone)}>
                   {meta.icon}
                   {meta.label}
                 </div>
@@ -314,15 +332,6 @@ function StrategyAnglesPanel({
   );
 }
 
-const ANGLE_META: Record<
-  string,
-  { label: string; icon: React.ReactNode }
-> = {
-  pain_led:    { label: "Pain-led",    icon: <Flame className="h-3.5 w-3.5" /> },
-  trigger_led: { label: "Trigger-led", icon: <TrendingUp className="h-3.5 w-3.5" /> },
-  outcome_led: { label: "Outcome-led", icon: <Lightbulb className="h-3.5 w-3.5" /> },
-};
-
 function EmailCard({
   email,
   evidenceById,
@@ -330,7 +339,7 @@ function EmailCard({
   email: Email;
   evidenceById: Map<string, import("@/lib/api").EvidenceRecord>;
 }) {
-  const angleMeta = ANGLE_META[email.angle] ?? ANGLE_META.pain_led;
+  const angleMeta = getAngleMeta(email.angle);
 
   const [copied, setCopied] = React.useState(false);
   const copy = async () => {
@@ -340,10 +349,10 @@ function EmailCard({
   };
 
   return (
-    <Card className="overflow-hidden">
-      <CardHeader className="border-b border-border/60 pb-4">
+    <Card className="overflow-hidden border-2 border-[hsl(var(--sender))]/25 bg-gradient-to-br from-card via-card to-[hsl(var(--sender))]/5 shadow-sm">
+      <CardHeader className="border-b border-border/60 bg-background/50 px-6 py-5">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
+          <div className={cn("flex items-center gap-2 text-xs uppercase tracking-wide font-semibold", angleMeta.tone)}>
             {angleMeta.icon}
             {angleMeta.label}
           </div>
@@ -352,288 +361,18 @@ function EmailCard({
             {copied ? "Copied" : "Copy"}
           </Button>
         </div>
-        <CardTitle className="text-base mt-2 leading-snug">
+        <CardTitle className="text-xl md:text-2xl mt-3 leading-snug font-semibold">
           {email.subject}
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-4 pt-5">
-        <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-foreground/90">
+      <CardContent className="space-y-5 px-6 py-8">
+        <pre className="whitespace-pre-wrap font-sans text-base leading-relaxed text-foreground/90">
           {email.body}
         </pre>
 
-        <EmailSafetyPanel email={email} evidenceById={evidenceById} />
+        <EmailClaimsPanel email={email} evidenceById={evidenceById} />
       </CardContent>
     </Card>
-  );
-}
-
-type ClaimVariant =
-  | "default"
-  | "secondary"
-  | "outline"
-  | "success"
-  | "warning"
-  | "destructive"
-  | "muted";
-
-const STATEMENT_STATUS_META: Record<
-  StatementSupportStatus,
-  {
-    label: string;
-    variant: ClaimVariant;
-    icon: React.ReactNode;
-    explain: string;
-  }
-> = {
-  supported: {
-    label: "supported",
-    variant: "success",
-    icon: <Check className="h-3 w-3" />,
-    explain: "Supported by available workflow context.",
-  },
-  not_checkable: {
-    label: "not checkable",
-    variant: "muted",
-    icon: <AlertTriangle className="h-3 w-3" />,
-    explain: "Rhetorical or non-factual; not verified as a fact claim.",
-  },
-  unsupported: {
-    label: "unsupported",
-    variant: "warning",
-    icon: <AlertTriangle className="h-3 w-3" />,
-    explain: "Not supported by available context.",
-  },
-  contradicted: {
-    label: "contradicted",
-    variant: "destructive",
-    icon: <XOctagon className="h-3 w-3" />,
-    explain: "Contradicted by available context.",
-  },
-  sender_context_not_verified: {
-    label: "sender context not verified",
-    variant: "muted",
-    icon: <AlertTriangle className="h-3 w-3" />,
-    explain:
-      "Sender / value-prop positioning; no sender context available to verify. Not a safety failure.",
-  },
-};
-
-const CATEGORY_META: Record<
-  import("@/lib/types").StatementCategory,
-  { label: string; variant: ClaimVariant; explain: string }
-> = {
-  target_fact: {
-    label: "target fact",
-    variant: "default",
-    explain:
-      "Assertion about the recipient company. Safety-critical: an unsupported target fact marks the email unsafe.",
-  },
-  sender_or_value_prop: {
-    label: "sender / value prop",
-    variant: "secondary",
-    explain:
-      "Assertion about the sender / its product / value proposition. Informational; never marks the email unsafe.",
-  },
-  generic_or_rhetorical: {
-    label: "generic",
-    variant: "outline",
-    explain:
-      "Generic commercial language with no concrete fact. Never a safety failure.",
-  },
-  cta: {
-    label: "CTA",
-    variant: "outline",
-    explain: "Greeting, sign-off, or meeting-ask. Never a safety failure.",
-  },
-};
-
-function StatementStatusBadge({
-  status,
-  score,
-}: {
-  status: StatementSupportStatus;
-  score: number | null;
-}) {
-  const m = STATEMENT_STATUS_META[status];
-  return (
-    <Badge variant={m.variant} className="shrink-0" title={m.explain}>
-      {m.icon}
-      <span className="ml-0.5">{m.label}</span>
-      {score !== null && (
-        <span className="ml-1 font-mono text-[10px] opacity-70">
-          {score.toFixed(2)}
-        </span>
-      )}
-    </Badge>
-  );
-}
-
-function StatementCategoryBadge({
-  category,
-}: {
-  category: import("@/lib/types").StatementCategory;
-}) {
-  const m = CATEGORY_META[category];
-  return (
-    <Badge variant={m.variant} className="shrink-0" title={m.explain}>
-      {m.label}
-    </Badge>
-  );
-}
-
-function EmailSafetyPanel({
-  email,
-  evidenceById,
-}: {
-  email: Email;
-  evidenceById: Map<string, import("@/lib/api").EvidenceRecord>;
-}) {
-  const safety = email.safety;
-  const statements = safety?.statements ?? [];
-
-  return (
-    <div className="border-t border-border/60 pt-4 space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Body verification
-        </p>
-        {safety && (
-          <>
-            <Badge
-              variant={safety.final_email_safe ? "success" : "destructive"}
-              className="text-[10px]"
-            >
-              {safety.final_email_safe ? "safe" : "unsafe"}
-            </Badge>
-            {!safety.verification_ok && (
-              <Badge
-                variant="destructive"
-                className="text-[10px]"
-                title="The verifier LLM call failed for at least one statement, so the email cannot be confirmed as safe."
-              >
-                verifier unavailable
-              </Badge>
-            )}
-            {safety.email_regenerated && (
-              <Badge variant="outline" className="text-[10px]">
-                regenerated ×{safety.regeneration_count}
-              </Badge>
-            )}
-          </>
-        )}
-      </div>
-
-      {!safety ? (
-        <p className="text-xs italic text-muted-foreground">
-          Verification not run yet.
-        </p>
-      ) : statements.length === 0 ? (
-        <p className="text-xs italic text-muted-foreground">
-          No checkable factual statements extracted from this body.
-        </p>
-      ) : (
-        <ul className="space-y-2.5">
-          {statements.map((s) => (
-            <StatementRow
-              key={s.statement_id}
-              statement={s}
-              evidenceById={evidenceById}
-            />
-          ))}
-        </ul>
-      )}
-
-      {safety && safety.failed_statements.length > 0 && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/5 p-2.5">
-          <p className="text-xs font-medium text-destructive mb-1">
-            Failed statements
-          </p>
-          <ul className="text-xs text-destructive/90 space-y-1">
-            {safety.failed_statements.map((t) => (
-              <li key={t}>· {t}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function isVerifierErrorRationale(rationale: string): boolean {
-  const r = rationale.toLowerCase();
-  return (
-    r.includes("verification_failed") ||
-    r.includes("verifier unavailable") ||
-    r.includes("nli verifier unavailable")
-  );
-}
-
-function StatementRow({
-  statement,
-  evidenceById,
-}: {
-  statement: VerifiedStatement;
-  evidenceById: Map<string, import("@/lib/api").EvidenceRecord>;
-}) {
-  const obsRefs = statement.context_refs
-    .filter((r) => r.ref_type === "observation")
-    .map((r) => r.ref_id.replace(/^sender:/, ""));
-
-  return (
-    <li className="rounded-md border border-border/60 p-2.5 list-none">
-      <div className="flex items-start gap-2">
-        <div className="flex flex-col items-start gap-1 shrink-0">
-          <StatementCategoryBadge category={statement.category} />
-          <StatementStatusBadge
-            status={statement.status}
-            score={statement.nli_score}
-          />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm leading-snug text-foreground/90">
-            {statement.text}
-          </p>
-          {statement.rationale && (
-            <p
-              className={cn(
-                "mt-1 text-xs",
-                isVerifierErrorRationale(statement.rationale)
-                  ? "text-destructive"
-                  : "text-muted-foreground",
-              )}
-            >
-              {statement.rationale}
-            </p>
-          )}
-          {statement.context_refs.length > 0 && (
-            <div className="mt-2 space-y-1">
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                Context used
-              </p>
-              {statement.context_refs.map((ref) => (
-                <p
-                  key={ref.ref_id}
-                  className="text-xs text-muted-foreground line-clamp-2"
-                >
-                  <span className="font-mono text-[10px]">{ref.ref_id}</span>
-                  {ref.label ? ` · ${ref.label}` : ""}: {ref.snippet}
-                </p>
-              ))}
-            </div>
-          )}
-          {obsRefs.length > 0 && (
-            <div className="mt-1.5">
-              <ExpandableEvidence count={obsRefs.length}>
-                <EvidenceList
-                  evidenceRefs={obsRefs}
-                  evidenceById={evidenceById}
-                />
-              </ExpandableEvidence>
-            </div>
-          )}
-        </div>
-      </div>
-    </li>
   );
 }
 

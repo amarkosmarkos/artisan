@@ -95,6 +95,8 @@ Return JSON: { "observations": [ { "kind": "...", "text": "...", "section_id": "
 
 _SYSTEM_TARGET = """You extract commercially-relevant observations about a TARGET company that someone may want to sell *to*.
 
+The target is the company that *owns* the website (the crawled domain). It is NOT a third-party company named on customer logos, testimonials, or case-study pages.
+
 For each section, write ONE-SENTENCE observations capturing:
 - what the target company does / sells
 - the industry, market, geography it operates in
@@ -112,6 +114,14 @@ Rules:
 - Do NOT speculate. If unclear, do not extract.
 - Each observation is ONE clean fact.
 - confidence reflects how unambiguous the section makes the claim.
+- Each section includes a page url. Use url + heading to spot customer/case-study/testimonial pages
+  (paths like /customers, /case-stud, /success-stories, or headings that name another company).
+  On those pages:
+  - OK: what the target sells, who they serve, outcomes they claim for clients, industries served.
+  - NOT OK: facts about the featured customer (their size, revenue, stack, geography, products,
+    hiring, etc.) unless clearly stated about the target itself.
+  - If a sentence is only about a named customer company, skip it or rephrase as what it implies
+    about the target (e.g. "serves enterprise retailers" not "Retailer X has 10k stores").
 
 Return JSON: { "observations": [ { "kind": "...", "text": "...", "section_id": "...", "confidence": 0.0-1.0 }, ... ] }
 """
@@ -184,11 +194,16 @@ async def extract_observations(
 
     async def _run_batch(idx: int, batch: list[dict]) -> list[Observation]:
         nonlocal done_counter
-        user = (
+        user_prefix = (
             "Extract observations from the following sections. "
             "Cite the exact section_id for each observation.\n\n"
-            + _format_sections(batch)
         )
+        if task == "target":
+            user_prefix += (
+                "Subject company = the website owner (see each section's url domain). "
+                "Do not attribute case-study or customer-page facts to a featured client.\n\n"
+            )
+        user = user_prefix + _format_sections(batch)
         async with sem:
             try:
                 # llm.structured is sync (Instructor + sync AzureOpenAI). Push

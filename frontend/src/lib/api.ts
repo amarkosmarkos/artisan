@@ -8,7 +8,6 @@ import type {
   ValueProposition,
   StrategyArtifact,
   Email,
-  ClaimMapEntry,
 } from "./types";
 
 const API_BASE = "/api/v1";
@@ -49,7 +48,6 @@ export interface PersonaRunRow {
     sender_value_propositions?: ValueProposition[];
   } | null;
   emails: Email[];
-  claim_map: ClaimMapEntry[];
 }
 
 export interface TargetDetail extends CompanyRow {
@@ -184,12 +182,6 @@ export async function getCompanyObservations(
   return jsonFetch(`/companies/${companyId}/observations`);
 }
 
-export async function getTargetClaimMap(
-  targetCompanyId: string,
-): Promise<{ claims: ClaimMapEntry[] }> {
-  return jsonFetch(`/targets/${targetCompanyId}/claim-map`);
-}
-
 export async function deleteStrategy(
   targetCompanyId: string,
   personaId?: string,
@@ -298,14 +290,20 @@ export interface RunSummary {
   tokens_in: number | null;
   tokens_out: number | null;
   cost_usd: number | null;
+  llm_calls: number | null;
   pages_fetched: number | null;
   sections_created: number | null;
   observations_extracted: number | null;
   observations_validated: number | null;
   observations_rejected: number | null;
-  claims_total: number | null;
-  claims_supported: number | null;
-  claim_support_rate: number | null;
+  declared_claims_count: number | null;
+  email_claims_count: number | null;
+  unsupported_claims_count: number | null;
+  safety_confidence_avg: number | null;
+  emails_total: number | null;
+  emails_safe_count: number | null;
+  email_safe_rate: number | null;
+  final_email_safe: boolean | null;
   angle_overlap: number | null;
   stages: number | null;
 }
@@ -331,11 +329,16 @@ export interface RunsAggregate {
   tokens_in: number;
   tokens_out: number;
   cost_usd: number;
+  llm_calls: number;
   pages_fetched: number;
   observations_extracted: number;
-  claims_total: number;
-  claims_supported: number;
-  claim_support_rate: number | null;
+  declared_claims_count: number;
+  email_claims_count: number;
+  unsupported_claims_count: number;
+  emails_total: number;
+  emails_safe_count: number;
+  email_safe_rate: number | null;
+  safety_confidence_avg: number | null;
 }
 
 export async function listRuns(opts?: {
@@ -441,6 +444,7 @@ export function streamProgress(
     "section", "section_done", "extract", "extract_progress", "extract_done",
     "validate", "validate_progress", "validate_done", "filter_done",
     "icp_pass1", "planner", "planner_done", "fetch_more", "icp", "vp",
+    "target_discovery", "target_discovery_done",
     "strategy", "strategy_done",
     "write_emails", "write_emails_done",
     "email_guard", "email_guard_progress", "email_guard_done",

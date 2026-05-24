@@ -15,12 +15,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { StageDetailView } from "@/components/stage-detail-view";
+import { stageLabel } from "@/components/stages";
 import {
   getCompanyObservations,
   getCompanySources,
   getRunDetail,
 } from "@/lib/api";
-import type { RunMetrics } from "@/lib/types";
+import type { LlmUsageByPurpose, RunMetrics } from "@/lib/types";
 
 export default function RunDetailPage() {
   const params = useParams<{ run_id: string }>();
@@ -49,7 +50,7 @@ export default function RunDetailPage() {
   const isTarget = data.kind === "target";
   const latencyMs = effectiveLatencyMs(m);
   const validationRate = effectiveValidationRate(m);
-  const claimSupportRate = isTarget ? effectiveClaimSupportRate(m) : null;
+  const emailSafeRate = isTarget ? effectiveEmailSafeRate(m) : null;
   const senderHref = data.company_id ? `/senders/${data.company_id}` : null;
   const targetHref = data.target_company_id
     ? `/targets/${data.target_company_id}`
@@ -111,6 +112,11 @@ export default function RunDetailPage() {
           }
         />
         <Stat
+          label="LLM calls"
+          value={String(m.llm_calls ?? 0)}
+          sub={`$${(m.cost_usd ?? 0).toFixed(4)} total`}
+        />
+        <Stat
           label="Tokens"
           value={formatNumber((m.tokens_in ?? 0) + (m.tokens_out ?? 0))}
           sub={`${formatNumber(m.tokens_in ?? 0)} in / ${formatNumber(m.tokens_out ?? 0)} out`}
@@ -134,13 +140,33 @@ export default function RunDetailPage() {
           value={formatPct(validationRate)}
         />
         <Stat
-          label="Evidence support"
-          value={isTarget ? formatPct(claimSupportRate) : "N/A"}
+          label="Emails safe"
+          value={isTarget ? formatPct(emailSafeRate) : "N/A"}
           sub={
             isTarget
-              ? `${statementSupported(m)}/${statementTotal(m)} supported · regen ${m.regeneration_count ?? 0} · ${m.final_email_safe === false ? "unsafe" : "safe"}`
+              ? `${m.emails_safe_count ?? 0}/${m.emails_total ?? 0} safe · regen ${m.regeneration_count ?? 0}`
               : "Target runs only"
           }
+        />
+        <Stat
+          label="Guardrail confidence"
+          value={
+            isTarget && m.safety_confidence_avg !== null
+              ? m.safety_confidence_avg.toFixed(2)
+              : isTarget
+                ? "—"
+                : "N/A"
+          }
+          sub={isTarget ? "avg across emails" : "Target runs only"}
+        />
+        <Stat
+          label="Claims / unsupported"
+          value={
+            isTarget
+              ? `${m.email_claims_count ?? 0} / ${m.unsupported_claims_count ?? 0}`
+              : "N/A"
+          }
+          sub={isTarget ? "guardrail-identified claims" : "Target runs only"}
         />
         <Stat
           label="Angle overlap"
@@ -154,6 +180,19 @@ export default function RunDetailPage() {
           sub={isTarget ? "cosine" : "Target runs only"}
         />
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">LLM usage breakdown</CardTitle>
+          <CardDescription>
+            Every Azure OpenAI call in this run, grouped by pipeline step.
+            Extraction batches share one purpose key and are aggregated here.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <LlmUsageBreakdown metrics={m} />
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -190,29 +229,28 @@ export default function RunDetailPage() {
 function Warnings({ metrics }: { metrics: RunMetrics }) {
   const issues: { label: string; tone: "destructive" | "warning"; count: number }[] =
     [];
-  const contradicted =
-    metrics.contradicted_statements_count ?? metrics.claims_contradicted ?? 0;
-  if (contradicted > 0) {
-    issues.push({
-      label: "Contradicted statements",
-      tone: "destructive",
-      count: contradicted,
-    });
-  }
-  const unsupported =
-    metrics.unsupported_statements_count ?? metrics.claims_unsupported ?? 0;
+  const unsupported = metrics.unsupported_claims_count ?? 0;
   if (unsupported > 0) {
     issues.push({
-      label: "Unsupported statements",
+      label: "Sender/target claims without retrieval backing",
       tone: "warning",
       count: unsupported,
     });
   }
-  if (metrics.final_email_safe === false) {
+  const unsafeEmails =
+    (metrics.emails_total ?? 0) - (metrics.emails_safe_count ?? 0);
+  if (unsafeEmails > 0) {
     issues.push({
-      label: "Email failed safety check",
+      label: "Emails marked unsafe by the guardrail",
       tone: "destructive",
-      count: metrics.failed_statements?.length ?? 1,
+      count: unsafeEmails,
+    });
+  }
+  if (metrics.verification_ok === false) {
+    issues.push({
+      label: "Guardrail LLM unavailable",
+      tone: "destructive",
+      count: 1,
     });
   }
   // Coverage-style warnings from planner.
@@ -336,6 +374,99 @@ function PipelineSources({ companyId }: { companyId: string }) {
   );
 }
 
+function LlmUsageBreakdown({ metrics }: { metrics: RunMetrics }) {
+  const rows = metrics.llm_usage_by_purpose ?? [];
+  if (rows.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        No per-purpose LLM breakdown recorded for this run (re-run the flow
+        after upgrading to populate this table).
+      </p>
+    );
+  }
+
+  const totals = rows.reduce(
+    (acc, r) => ({
+      calls: acc.calls + r.calls,
+      tokens_in: acc.tokens_in + r.tokens_in,
+      tokens_out: acc.tokens_out + r.tokens_out,
+      cost_usd: acc.cost_usd + r.cost_usd,
+    }),
+    { calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 },
+  );
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[640px] text-sm">
+        <thead>
+          <tr className="border-b border-border/60 text-left text-[10px] uppercase tracking-wide text-muted-foreground">
+            <th className="pb-2 pr-3 font-medium">Step</th>
+            <th className="pb-2 pr-3 font-medium text-right">Calls</th>
+            <th className="pb-2 pr-3 font-medium text-right">Tokens in</th>
+            <th className="pb-2 pr-3 font-medium text-right">Tokens out</th>
+            <th className="pb-2 font-medium text-right">Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <LlmUsageRow key={row.purpose} row={row} totalCost={totals.cost_usd} />
+          ))}
+        </tbody>
+        <tfoot>
+          <tr className="border-t border-border/60 font-medium">
+            <td className="pt-3 pr-3">Total</td>
+            <td className="pt-3 pr-3 text-right font-mono">{totals.calls}</td>
+            <td className="pt-3 pr-3 text-right font-mono">
+              {formatNumber(totals.tokens_in)}
+            </td>
+            <td className="pt-3 pr-3 text-right font-mono">
+              {formatNumber(totals.tokens_out)}
+            </td>
+            <td className="pt-3 text-right font-mono">
+              ${totals.cost_usd.toFixed(4)}
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  );
+}
+
+function LlmUsageRow({
+  row,
+  totalCost,
+}: {
+  row: LlmUsageByPurpose;
+  totalCost: number;
+}) {
+  const pct = totalCost > 0 ? (row.cost_usd / totalCost) * 100 : 0;
+  return (
+    <tr className="border-b border-border/40 last:border-0">
+      <td className="py-2.5 pr-3">
+        <p className="font-medium">{row.label}</p>
+        <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+          {row.purpose}
+        </p>
+      </td>
+      <td className="py-2.5 pr-3 text-right font-mono">{row.calls}</td>
+      <td className="py-2.5 pr-3 text-right font-mono">
+        {formatNumber(row.tokens_in)}
+      </td>
+      <td className="py-2.5 pr-3 text-right font-mono">
+        {formatNumber(row.tokens_out)}
+      </td>
+      <td className="py-2.5 text-right">
+        <span className="font-mono">${row.cost_usd.toFixed(4)}</span>
+        {totalCost > 0 && (
+          <span className="ml-1.5 text-[10px] text-muted-foreground">
+            ({pct.toFixed(0)}%)
+          </span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
 function StagesTimeline({ stages }: { stages: RunMetrics["stages"] }) {
   if (!stages || stages.length === 0) {
     return <p className="text-sm text-muted-foreground">No stages recorded.</p>;
@@ -351,11 +482,16 @@ function StagesTimeline({ stages }: { stages: RunMetrics["stages"] }) {
             className="rounded-md border border-border/60 p-3"
           >
             <div className="flex items-center justify-between gap-3">
-              <div className="font-mono text-sm">{s.name}</div>
-              <div className="text-xs text-muted-foreground">
+              <div className="text-sm font-medium">{stageLabel(s.name)}</div>
+              <div className="font-mono text-xs text-muted-foreground">
                 {(s.duration_ms / 1000).toFixed(2)}s · {pct.toFixed(0)}%
               </div>
             </div>
+            {s.name !== stageLabel(s.name) && (
+              <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+                {s.name}
+              </p>
+            )}
             <div className="mt-2 h-1.5 w-full rounded bg-border/60 overflow-hidden">
               <div
                 className="h-full bg-foreground/70"
@@ -502,24 +638,10 @@ function effectiveValidationRate(m: RunMetrics): number | null {
   return extracted > 0 && validated > 0 ? validated / extracted : null;
 }
 
-function statementTotal(m: RunMetrics): number {
-  return m.extracted_statements_count ?? m.claims_total ?? 0;
-}
-
-function statementSupported(m: RunMetrics): number {
-  return m.supported_statements_count ?? m.claims_supported ?? 0;
-}
-
-function effectiveClaimSupportRate(m: RunMetrics): number | null {
-  if (m.evidence_support_rate != null) return m.evidence_support_rate;
-  if (m.claim_support_rate != null) return m.claim_support_rate;
-  const checkable =
-    statementSupported(m) +
-    (m.unsupported_statements_count ?? m.claims_unsupported ?? 0) +
-    (m.contradicted_statements_count ?? m.claims_contradicted ?? 0);
-  if (checkable > 0) return statementSupported(m) / checkable;
-  const total = statementTotal(m);
-  return total > 0 ? statementSupported(m) / total : null;
+function effectiveEmailSafeRate(m: RunMetrics): number | null {
+  const total = m.emails_total ?? 0;
+  if (total <= 0) return null;
+  return (m.emails_safe_count ?? 0) / total;
 }
 
 function prettyUrl(url: string): string {

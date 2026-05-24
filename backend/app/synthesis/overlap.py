@@ -83,6 +83,7 @@ def diverge_pain_led(
             "subject": draft.subject.strip(),
             "body": draft.body.strip(),
             "safety": None,
+            "claims": [],
             "angle": AngleType.PAIN_LED,
         }
     )

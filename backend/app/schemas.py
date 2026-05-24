@@ -28,41 +28,6 @@ class ContactDecision(str, Enum):
     SKIP = "skip"
 
 
-class ClaimStatus(str, Enum):
-    """Legacy claim-map statuses (pre body-verifier pipeline)."""
-
-    ENTAILED = "entailed"
-    NEUTRAL = "neutral"
-    CONTRADICTED = "contradicted"
-    UNSUPPORTED = "unsupported"
-    REPAIRED = "repaired"
-
-
-class StatementSupportStatus(str, Enum):
-    SUPPORTED = "supported"
-    UNSUPPORTED = "unsupported"
-    CONTRADICTED = "contradicted"
-    NOT_CHECKABLE = "not_checkable"
-    # Sender / value-prop positioning that we cannot verify against sender
-    # context (no sender evidence available or no ref found). This status
-    # NEVER makes the email unsafe — it's an informational outcome only.
-    SENDER_CONTEXT_NOT_VERIFIED = "sender_context_not_verified"
-
-
-class StatementCategory(str, Enum):
-    """How a statement should be treated by the safety guard.
-
-    Only ``TARGET_FACT`` statements can mark an email unsafe. Everything
-    else is informational (sender positioning is the sender's own truth;
-    rhetoric and CTAs carry no factual risk).
-    """
-
-    TARGET_FACT = "target_fact"
-    SENDER_OR_VALUE_PROP = "sender_or_value_prop"
-    GENERIC_OR_RHETORICAL = "generic_or_rhetorical"
-    CTA = "cta"
-
-
 class AngleType(str, Enum):
     PAIN_LED = "pain_led"
     TRIGGER_LED = "trigger_led"
@@ -221,33 +186,57 @@ class StrategyArtifact(BaseModel):
 
 
 class StatementContextRef(BaseModel):
-    """A slice of workflow context cited during statement verification."""
+    """A slice of workflow context that can be cited as evidence.
+
+    Both the writer (when declaring its claims) and the guardrail (when
+    looking up cited refs) use the same ref_id namespace.
+    """
 
     ref_id: str
-    ref_type: str  # observation, section, value_prop, icp, strategy, persona
+    ref_type: str  # observation, value_prop, icp, strategy, persona, target
     label: str = ""
     snippet: str = ""
 
 
-class VerifiedStatement(BaseModel):
-    statement_id: str
+class EmailClaim(BaseModel):
+    """A factual claim used in an outbound email, end-to-end traceable.
+
+    The writer **declares** the claim with its scope and the CONTEXT INDEX
+    refs that back it (``evidence_refs``). The pipeline immediately hydrates
+    those refs into ``evidence`` snippets from the same retrieval that
+    produced the email. The guardrail then sets ``grounded`` / ``confidence``
+    based ONLY on the claim text + its cited evidence — no re-reading the
+    whole briefing, no independent extraction.
+    """
+
+    claim_id: str
     text: str
-    category: StatementCategory = StatementCategory.TARGET_FACT
-    status: StatementSupportStatus = StatementSupportStatus.NOT_CHECKABLE
-    nli_score: float | None = None
-    context_refs: list[StatementContextRef] = Field(default_factory=list)
-    rationale: str = ""
+    # general = broad market/industry knowledge; no evidence check required.
+    # sender / target = specific assertion that MUST be backed by retrieval.
+    scope: Literal["general", "sender", "target"] = "general"
+    evidence_refs: list[str] = Field(default_factory=list)
+    evidence: list[StatementContextRef] = Field(default_factory=list)
+    # Guardrail verdict (None = not yet judged).
+    grounded: bool | None = None
+    confidence: float | None = None
+    # Free-form short reason from the judge; surfaced in the UI for unsafe
+    # claims so the operator understands the failure mode.
+    reason: str = ""
 
 
 class EmailSafetyReport(BaseModel):
-    statements: list[VerifiedStatement] = Field(default_factory=list)
+    """Aggregate guardrail verdict for an email.
+
+    Per-claim verdicts live on ``Email.claims[i].grounded`` /
+    ``Email.claims[i].confidence``. This object only carries the email-level
+    roll-up so analytics and the UI can show a single safe / unsafe state.
+    """
+
+    is_safe: bool = True
+    confidence: float = 0.0
+    verification_ok: bool = True
     email_regenerated: bool = False
     regeneration_count: int = 0
-    final_email_safe: bool = True
-    failed_statements: list[str] = Field(default_factory=list)
-    # True only when the verifier LLM actually executed for every statement.
-    # When false, the final email MUST be treated as unsafe (spec item 7).
-    verification_ok: bool = True
 
 
 class Email(BaseModel):
@@ -255,20 +244,10 @@ class Email(BaseModel):
     angle: AngleType
     subject: str
     body: str
+    # Claims the writer declared (and the guardrail verified). Single
+    # source of truth for the UI; never two parallel lists.
+    claims: list[EmailClaim] = Field(default_factory=list)
     safety: EmailSafetyReport | None = None
-
-
-class ClaimMapEntry(BaseModel):
-    """Flattened statement row for analytics tables and legacy APIs."""
-
-    claim_id: str
-    email_id: str
-    angle: AngleType
-    text: str
-    category: StatementCategory = StatementCategory.TARGET_FACT
-    status: StatementSupportStatus
-    nli_score: float | None = None
-    citations: list[dict[str, str]] = Field(default_factory=list)
 
 
 # ---------- Persona input ----------
@@ -283,11 +262,24 @@ class PersonaInput(BaseModel):
 
 # ---------- Run summary ----------
 
+class LlmUsageByPurpose(BaseModel):
+    """One bucket of LLM usage grouped by call purpose (e.g. extraction, writer)."""
+
+    purpose: str
+    label: str
+    calls: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+
+
 class RunMetrics(BaseModel):
     latency_ms: float = 0.0
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    llm_calls: int = 0
+    llm_usage_by_purpose: list[LlmUsageByPurpose] = Field(default_factory=list)
     pages_fetched: int = 0
     sections_created: int = 0
     observations_extracted: int = 0
@@ -296,26 +288,19 @@ class RunMetrics(BaseModel):
     compression_ratio: float = 0.0
     raw_cleaned_chars: int = 0
     evidence_chars_used: int = 0
-    extracted_statements_count: int = 0
-    supported_statements_count: int = 0
-    unsupported_statements_count: int = 0
-    contradicted_statements_count: int = 0
-    not_checkable_statements_count: int = 0
-    evidence_support_rate: float | None = None
+    # Email-level safety roll-up across all generated emails.
+    declared_claims_count: int = 0
+    email_claims_count: int = 0
+    unsupported_claims_count: int = 0
+    safety_confidence_avg: float | None = None
     email_regenerated: bool = False
     regeneration_count: int = 0
+    emails_safe_count: int = 0
+    emails_total: int = 0
     final_email_safe: bool = True
     verification_ok: bool = True
-    failed_statements: list[str] = Field(default_factory=list)
     angle_overlap: float | None = None
     observation_validation_rate: float | None = None
-    # Legacy aliases (populated from statement metrics for older dashboards).
-    claims_total: int = 0
-    claims_supported: int = 0
-    claims_unsupported: int = 0
-    claims_contradicted: int = 0
-    claim_support_rate: float | None = None
-    unsupported_claim_rate: float | None = None
     planner_decisions: list[dict[str, Any]] = Field(default_factory=list)
     stages: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -334,6 +319,8 @@ class SenderResponse(BaseModel):
     value_propositions: list[ValueProposition] = Field(default_factory=list)
     observations: list[Observation]
     metrics: RunMetrics
+    # Populated automatically after sender synthesis when target discovery runs.
+    suggested_targets: SuggestedTargetsResponse | None = None
 
 
 class TargetRequest(BaseModel):
@@ -355,7 +342,6 @@ class TargetResponse(BaseModel):
     observations: list[Observation]
     strategy: StrategyArtifact
     emails: list[Email]
-    claim_map: list[ClaimMapEntry]
     metrics: RunMetrics
     # Resolved value proposition used to drive this target's strategy + emails.
     # When multiple VPs exist on the sender, this is the one the strategy
@@ -383,7 +369,7 @@ class SuggestedPersona(BaseModel):
     """
 
     title: str  # role or title, e.g. "VP of Engineering"
-    seniority: Seniority | None = None
+    seniority: Seniority
     name: str | None = None  # only when clearly public + well sourced
     rationale: str = ""
 

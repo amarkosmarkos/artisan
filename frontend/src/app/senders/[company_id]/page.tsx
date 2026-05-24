@@ -24,7 +24,14 @@ import {
   ObservationEvidenceCard,
   useEvidenceLookup,
 } from "@/components/claim-evidence";
-import { SenderTargetsPanel } from "@/components/sender-targets-panel";
+import {
+  SenderTargetsPanel,
+  type TargetsPrefill,
+} from "@/components/sender-targets-panel";
+import { SuggestedTargetsPanel } from "@/components/suggested-targets-panel";
+import { startTarget } from "@/lib/api";
+import type { PersonaInput } from "@/lib/types";
+import { SectionHeading } from "@/components/section-heading";
 import {
   deleteCompany,
   getCompanyDetail,
@@ -195,6 +202,30 @@ function SenderBody({
   onDelete: () => void;
   deleting: boolean;
 }) {
+  const router = useRouter();
+  const [discoveryRunning, setDiscoveryRunning] = React.useState(false);
+  const [targetsPrefill, setTargetsPrefill] =
+    React.useState<TargetsPrefill | null>(null);
+
+  const handleGenerateOutreach = React.useCallback(
+    async (input: { target_url: string; persona: PersonaInput }) => {
+      setDiscoveryRunning(true);
+      try {
+        const { run_id } = await startTarget({
+          sender_company_id: data.company_id,
+          target_url: input.target_url,
+          persona: input.persona,
+        });
+        router.push(`/run?kind=target&run=${run_id}&view=icp`);
+      } catch (e) {
+        window.alert(String(e));
+      } finally {
+        setDiscoveryRunning(false);
+      }
+    },
+    [data.company_id, router],
+  );
+
   const allEvidenceIds = React.useMemo(() => {
     const s = new Set(evidenceIdsForArtifacts);
     obsRows.forEach((o) => s.add(o.observation_id));
@@ -286,19 +317,41 @@ function SenderBody({
         </div>
       </header>
 
+      {/* --- ICP --- */}
+      {data.icp && (
+        <section className="space-y-4">
+          <SectionHeading
+            level="section"
+            title="Ideal customer profile"
+            description="Each field shows the inferred values, confidence, and the observations that support it."
+          />
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+            {ICP_FIELDS.map((spec) => (
+              <ICPCard
+                key={spec.key}
+                title={spec.label}
+                description={spec.description}
+                field={data.icp![spec.key]}
+                evidence={evidence}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* --- Value Proposition(s) --- */}
       {vps.length > 0 && (
-        <section className="space-y-3">
-          <div>
-            <h2 className="text-sm font-semibold tracking-tight">
-              Value proposition{vps.length > 1 ? "s" : ""}
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              {vps.length > 1
+        <section className="space-y-4">
+          <SectionHeading
+            level="section"
+            title={`Value proposition${vps.length > 1 ? "s" : ""}`}
+            description={
+              vps.length > 1
                 ? "Distinct business lines detected from sender evidence"
-                : "Why customers buy"}
-            </p>
-          </div>
+                : "Why customers buy"
+            }
+          />
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {vps.map((vp, i) => (
             <Card key={vp.id || `vp-${i}`} className="accent-sender bg-sender-soft">
               <CardHeader className="pb-3">
@@ -333,46 +386,17 @@ function SenderBody({
               </CardContent>
             </Card>
           ))}
-        </section>
-      )}
-
-      {/* --- ICP --- */}
-      {data.icp && (
-        <section className="space-y-3">
-          <div>
-            <h2 className="text-sm font-semibold tracking-tight">
-              Ideal customer profile
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              Each field shows the inferred values, confidence, and the
-              observations that support it.
-            </p>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            {ICP_FIELDS.map((spec) => (
-              <ICPCard
-                key={spec.key}
-                title={spec.label}
-                description={spec.description}
-                field={data.icp![spec.key]}
-                evidence={evidence}
-              />
-            ))}
           </div>
         </section>
       )}
 
       {/* --- Featured observation kinds (pains / triggers / proof / differentiators) --- */}
-      <section className="space-y-3">
-        <div>
-          <h2 className="text-sm font-semibold tracking-tight">
-            Extracted signals
-          </h2>
-          <p className="text-xs text-muted-foreground">
-            Atomic observations grouped by kind. Each one cites the section
-            it came from and carries its own NLI validation status.
-          </p>
-        </div>
+      <section className="space-y-4">
+        <SectionHeading
+          level="section"
+          title="Extracted signals"
+          description="Atomic observations grouped by kind. Each one cites the section it came from and carries its own NLI validation status."
+        />
         <div className="grid gap-3 md:grid-cols-2">
           {FEATURED_KINDS.map((spec) => {
             const list = grouped.get(spec.kind) ?? [];
@@ -391,18 +415,32 @@ function SenderBody({
         </div>
       </section>
 
-      {/* --- Targets panel (existing) --- */}
-      <section className="space-y-3">
-        <div>
-          <h2 className="text-sm font-semibold tracking-tight">
-            Targets in this campaign
-          </h2>
-          <p className="text-xs text-muted-foreground">
-            Companies you're pursuing under this sender. Each target carries
-            its own personas (recipients).
-          </p>
-        </div>
-        <SenderTargetsPanel senderCompanyId={data.company_id} />
+      {/* --- Discover + add targets --- */}
+      <section className="space-y-4">
+        <SectionHeading
+          level="section"
+          title="Targets & outreach"
+          description="Discover ICP-fit companies, add your own target, or manage targets already in this campaign."
+        />
+        <SuggestedTargetsPanel
+          senderCompanyId={data.company_id}
+          autoDiscover={false}
+          className="mt-0"
+          running={discoveryRunning}
+          onGenerateOutreach={handleGenerateOutreach}
+          onPrefillEvaluate={({ target_url, persona }) => {
+            setTargetsPrefill({
+              target_url,
+              role: persona.role,
+              seniority: persona.seniority,
+              name: persona.name ?? undefined,
+            });
+          }}
+        />
+        <SenderTargetsPanel
+          senderCompanyId={data.company_id}
+          prefill={targetsPrefill}
+        />
       </section>
 
       {/* --- Other observation kinds --- */}

@@ -12,14 +12,10 @@ import { Suspense } from "react";
 import {
   ArrowLeft,
   ExternalLink,
-  Flame,
-  Lightbulb,
   Loader2,
   Send,
-  Sparkles,
   Target as TargetIcon,
   Trash2,
-  TrendingUp,
   UserRound,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -36,7 +32,10 @@ import {
   ObservationEvidenceCard,
   useEvidenceLookup,
 } from "@/components/claim-evidence";
+import { EmailClaimsPanel } from "@/components/email-claims-panel";
 import { SelectedValuePropositionCard } from "@/components/selected-vp-card";
+import { SectionHeading } from "@/components/section-heading";
+import { getAngleMeta } from "@/lib/angle-meta";
 import {
   deleteCompany,
   deleteEmail,
@@ -49,33 +48,11 @@ import {
   type TargetDetail,
 } from "@/lib/api";
 import type {
-  AngleType,
   Email,
   FitLevel,
   Seniority,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
-
-const ANGLE_META: Record<
-  AngleType,
-  { label: string; icon: React.ReactNode; tone: string }
-> = {
-  pain_led: {
-    label: "Pain-led",
-    icon: <Flame className="h-3.5 w-3.5" />,
-    tone: "text-rose-400",
-  },
-  trigger_led: {
-    label: "Trigger-led",
-    icon: <TrendingUp className="h-3.5 w-3.5" />,
-    tone: "text-amber-400",
-  },
-  outcome_led: {
-    label: "Outcome-led",
-    icon: <Sparkles className="h-3.5 w-3.5" />,
-    tone: "text-emerald-400",
-  },
-};
 
 const FIT_META: Record<
   FitLevel,
@@ -348,14 +325,12 @@ function PersonaPanel({
     const ids: string[] = [];
     angles.forEach((a) => ids.push(...a.evidence_refs));
     persona.emails.forEach((e) => {
-      for (const s of e.safety?.statements ?? []) {
-        for (const ref of s.context_refs) {
-          if (
-            ref.ref_type === "observation" &&
-            (ref.ref_id.startsWith("obs_") ||
-              ref.ref_id.startsWith("sender:obs_"))
-          ) {
-            ids.push(ref.ref_id.replace(/^sender:/, ""));
+      for (const c of e.claims ?? []) {
+        for (const ref of c.evidence_refs ?? []) {
+          if (ref.startsWith("obs_")) {
+            ids.push(ref);
+          } else if (ref.startsWith("sender:obs_")) {
+            ids.push(ref.slice("sender:".length));
           }
         }
       }
@@ -581,19 +556,15 @@ function PersonaPanel({
       )}
 
       {angles.length > 0 && (
-        <section className="space-y-2">
-          <div>
-            <h2 className="text-sm font-semibold tracking-tight">
-              Recommended outbound angles
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              Each angle is anchored on observation IDs you can expand to see
-              the supporting snippet.
-            </p>
-          </div>
+        <section className="space-y-4">
+          <SectionHeading
+            level="section"
+            title="Recommended outbound angles"
+            description="Each angle is anchored on observation IDs you can expand to see the supporting snippet."
+          />
           <div className="grid gap-3 md:grid-cols-2">
             {angles.map((a, i) => {
-              const meta = ANGLE_META[a.type];
+              const meta = getAngleMeta(a.type);
               return (
                 <Card key={i} className="accent-claim">
                   <CardHeader className="pb-2">
@@ -618,17 +589,13 @@ function PersonaPanel({
       )}
 
       {persona.emails.length > 0 && (
-        <section className="space-y-3">
-          <div>
-            <h2 className="text-sm font-semibold tracking-tight">
-              Generated emails
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              Two emails with meaningfully different angles. Every factual
-              claim is expandable to its grounding evidence.
-            </p>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2">
+        <section className="space-y-6">
+          <SectionHeading
+            level="page"
+            title="Generated emails"
+            description="Final outreach copy — ready to review and send."
+          />
+          <div className="space-y-8">
             {persona.emails.map((e) => (
               <EmailCard
                 key={e.email_id}
@@ -643,33 +610,6 @@ function PersonaPanel({
                     );
                   }
                 }}
-              />
-            ))}
-          </div>
-        </section>
-      )}
-
-      {persona.claim_map.length > 0 && (
-        <section className="space-y-2">
-          <div>
-            <h2 className="text-sm font-semibold tracking-tight">
-              Claim map for this persona
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              Every factual claim across the two emails, with NLI status and
-              the grounding evidence.
-            </p>
-          </div>
-          <div className="space-y-2">
-            {persona.claim_map.map((c) => (
-              <ClaimMapRow
-                key={c.claim_id}
-                claim={c.text}
-                category={c.category}
-                status={c.status}
-                score={c.nli_score}
-                citations={c.citations}
-                angle={c.angle}
               />
             ))}
           </div>
@@ -698,135 +638,6 @@ function PersonaPanel({
   );
 }
 
-function ClaimMapRow({
-  claim,
-  category,
-  status,
-  score,
-  citations,
-  angle,
-}: {
-  claim: string;
-  category: import("@/lib/types").StatementCategory;
-  status: import("@/lib/types").StatementSupportStatus;
-  score: number | null;
-  citations: { url: string; snippet: string }[];
-  angle: string;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const meta = ANGLE_META[angle as AngleType];
-  const categoryLabel: Record<
-    import("@/lib/types").StatementCategory,
-    string
-  > = {
-    target_fact: "target fact",
-    sender_or_value_prop: "sender / value prop",
-    generic_or_rhetorical: "generic",
-    cta: "CTA",
-  };
-  return (
-    <div className="rounded-lg border border-border/60 bg-claim">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-start gap-2 px-3 py-2.5 text-left"
-      >
-        <span
-          className={cn(
-            "mt-0.5 h-2 w-2 shrink-0 rounded-full",
-            status === "supported" && "bg-[hsl(var(--success))]",
-            (status === "not_checkable" ||
-              status === "sender_context_not_verified") &&
-              "bg-muted-foreground",
-            status === "contradicted" && "bg-destructive",
-            status === "unsupported" && "bg-[hsl(var(--warning))]",
-          )}
-        />
-        <div className="min-w-0 flex-1">
-          <p className="text-sm leading-snug text-foreground/90">{claim}</p>
-          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            {meta && (
-              <Badge variant="outline" className="font-normal">
-                <span className={meta.tone}>{meta.icon}</span>
-                <span className="ml-1">{meta.label}</span>
-              </Badge>
-            )}
-            <Badge
-              variant={
-                category === "target_fact"
-                  ? "default"
-                  : category === "sender_or_value_prop"
-                    ? "secondary"
-                    : "outline"
-              }
-            >
-              {categoryLabel[category]}
-            </Badge>
-            <Badge
-              variant={
-                status === "supported"
-                  ? "success"
-                  : status === "contradicted"
-                    ? "destructive"
-                    : status === "not_checkable" ||
-                        status === "sender_context_not_verified"
-                      ? "muted"
-                      : "warning"
-              }
-            >
-              {status === "sender_context_not_verified"
-                ? "sender context not verified"
-                : status}
-              {score !== null && (
-                <span className="ml-1 font-mono text-[10px] opacity-70">
-                  {score.toFixed(2)}
-                </span>
-              )}
-            </Badge>
-            <Badge variant="outline" className="font-mono">
-              {citations.length} citation
-              {citations.length === 1 ? "" : "s"}
-            </Badge>
-          </div>
-        </div>
-      </button>
-      {open && (
-        <div className="space-y-2 border-t border-border/60 px-3 py-2.5">
-          {citations.length === 0 && (
-            <p className="text-xs text-muted-foreground">
-              No citations recorded.
-            </p>
-          )}
-          {citations.map((c, i) => (
-            <div
-              key={i}
-              className="rounded-md border border-border/40 bg-background/50 p-2.5"
-            >
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">
-                Source on page
-              </p>
-              <p className="text-sm leading-snug text-foreground/90 whitespace-pre-wrap">
-                {c.snippet}
-              </p>
-              {c.url && (
-                <a
-                  href={c.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                >
-                  <ExternalLink className="h-3 w-3" />
-                  {prettyUrl(c.url)}
-                </a>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function EmailCard({
   email,
   evidence,
@@ -836,85 +647,28 @@ function EmailCard({
   evidence: Map<string, import("@/lib/api").EvidenceRecord>;
   onDelete: () => void;
 }) {
-  const meta = ANGLE_META[email.angle];
+  const meta = getAngleMeta(email.angle);
   return (
-    <Card className="accent-claim">
-      <CardHeader className="pb-2">
+    <Card className="overflow-hidden border-2 border-[hsl(var(--sender))]/25 bg-gradient-to-br from-card via-card to-[hsl(var(--sender))]/5 shadow-sm accent-claim">
+      <CardHeader className="border-b border-border/60 bg-background/50 px-6 py-5 pb-2">
         <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <span className={meta.tone}>{meta.icon}</span>
-            <CardTitle className="text-sm">{meta.label}</CardTitle>
+          <div className={cn("flex items-center gap-2 text-xs uppercase tracking-wide font-semibold", meta.tone)}>
+            {meta.icon}
+            <span>{meta.label}</span>
           </div>
           <Button variant="ghost" size="sm" onClick={onDelete}>
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <CardDescription className="text-foreground font-medium">
+        <CardTitle className="text-xl md:text-2xl mt-3 leading-snug font-semibold">
           {email.subject}
-        </CardDescription>
+        </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-foreground/90">
+      <CardContent className="space-y-5 px-6 py-8">
+        <pre className="whitespace-pre-wrap font-sans text-base leading-relaxed text-foreground/90">
           {email.body}
         </pre>
-        <div className="space-y-2 pt-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Body verification (
-              {email.safety?.statements.length ?? 0})
-            </p>
-            {email.safety && (
-              <Badge
-                variant={
-                  email.safety.final_email_safe ? "success" : "destructive"
-                }
-                className="text-[10px]"
-              >
-                {email.safety.final_email_safe ? "safe" : "unsafe"}
-              </Badge>
-            )}
-            {email.safety && !email.safety.verification_ok && (
-              <Badge
-                variant="destructive"
-                className="text-[10px]"
-                title="Verifier LLM failed for at least one statement; cannot confirm safety."
-              >
-                verifier unavailable
-              </Badge>
-            )}
-            {email.safety?.email_regenerated && (
-              <Badge variant="outline" className="text-[10px]">
-                regenerated ×{email.safety.regeneration_count}
-              </Badge>
-            )}
-          </div>
-          {(email.safety?.statements ?? []).map((s) => {
-            const obsRefs = s.context_refs
-              .filter((r) => r.ref_type === "observation")
-              .map((r) => r.ref_id.replace(/^sender:/, ""));
-            return (
-              <div key={s.statement_id} className="space-y-1">
-                <ClaimEvidence
-                  claim={s.text}
-                  status={s.status}
-                  score={s.nli_score}
-                  evidenceIds={obsRefs}
-                  evidence={evidence}
-                />
-                {s.rationale && (
-                  <p className="text-xs text-muted-foreground pl-1">
-                    {s.rationale}
-                  </p>
-                )}
-              </div>
-            );
-          })}
-          {email.safety?.failed_statements.map((t) => (
-            <p key={t} className="text-xs text-destructive">
-              Failed: {t}
-            </p>
-          ))}
-        </div>
+        <EmailClaimsPanel email={email} evidenceById={evidence} compact />
       </CardContent>
     </Card>
   );
@@ -1078,6 +832,3 @@ function formatDate(iso: string): string {
     return iso;
   }
 }
-
-// suppress unused-import noise: <Lightbulb> reserved for future angle types
-void Lightbulb;

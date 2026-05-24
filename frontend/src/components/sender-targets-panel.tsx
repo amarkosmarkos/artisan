@@ -52,11 +52,23 @@ const SENIORITIES: { value: Seniority; label: string }[] = [
   { value: "founder", label: "Founder" },
 ];
 
-interface Props {
-  senderCompanyId: string;
+export interface TargetsPrefill {
+  target_url: string;
+  role: string;
+  seniority: Seniority;
+  name?: string;
 }
 
-export function SenderTargetsPanel({ senderCompanyId }: Props) {
+interface Props {
+  senderCompanyId: string;
+  /** Prefill the add-target / persona forms (e.g. from suggested targets panel). */
+  prefill?: TargetsPrefill | null;
+}
+
+export function SenderTargetsPanel({
+  senderCompanyId,
+  prefill = null,
+}: Props) {
   const queryClient = useQueryClient();
   const targets = useQuery({
     queryKey: ["sender-targets", senderCompanyId],
@@ -87,6 +99,12 @@ export function SenderTargetsPanel({ senderCompanyId }: Props) {
   });
 
   const [targetUrl, setTargetUrl] = React.useState("");
+
+  React.useEffect(() => {
+    if (!prefill?.target_url) return;
+    setTargetUrl(prefill.target_url);
+  }, [prefill]);
+
   const onAddTarget = (e: React.FormEvent) => {
     e.preventDefault();
     if (!targetUrl.trim()) return;
@@ -152,6 +170,11 @@ export function SenderTargetsPanel({ senderCompanyId }: Props) {
           key={t.company_id}
           senderCompanyId={senderCompanyId}
           target={t}
+          personaPrefill={
+            prefill?.target_url && urlsMatch(prefill.target_url, t.url)
+              ? prefill
+              : null
+          }
           onRemove={() => {
             if (
               confirm(
@@ -173,11 +196,13 @@ function SenderTargetCard({
   target,
   onRemove,
   removing,
+  personaPrefill,
 }: {
   senderCompanyId: string;
   target: SenderTargetRow;
   onRemove: () => void;
   removing: boolean;
+  personaPrefill?: TargetsPrefill | null;
 }) {
   const [open, setOpen] = React.useState(true);
   const queryClient = useQueryClient();
@@ -233,6 +258,14 @@ function SenderTargetCard({
   const [role, setRole] = React.useState("VP of Sales");
   const [seniority, setSeniority] = React.useState<Seniority>("vp");
   const [name, setName] = React.useState("");
+
+  React.useEffect(() => {
+    if (!personaPrefill) return;
+    setRole(personaPrefill.role);
+    setSeniority(personaPrefill.seniority);
+    setName(personaPrefill.name ?? "");
+    setOpen(true);
+  }, [personaPrefill]);
 
   const onCreate = (e: React.FormEvent) => {
     e.preventDefault();
@@ -416,5 +449,17 @@ function formatDate(iso: string): string {
     return new Date(iso).toLocaleString();
   } catch {
     return iso;
+  }
+}
+
+function urlsMatch(a: string, b: string): boolean {
+  try {
+    const na = new URL(a.includes("://") ? a : `https://${a}`);
+    const nb = new URL(b.includes("://") ? b : `https://${b}`);
+    return (
+      na.hostname.replace(/^www\./, "") === nb.hostname.replace(/^www\./, "")
+    );
+  } catch {
+    return a.trim().toLowerCase() === b.trim().toLowerCase();
   }
 }

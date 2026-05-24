@@ -15,6 +15,8 @@ import {
   UserRound,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { MarkosLogo } from "@/components/markos-logo";
+import { ThemeToggle } from "@/components/theme-provider";
 import {
   listCompanies,
   listPersonas,
@@ -55,14 +57,9 @@ export function AppSidebar() {
   });
 
   return (
-    <aside className="hidden md:flex md:w-64 md:shrink-0 md:flex-col md:border-r md:border-border/60 md:bg-card/40 md:backdrop-blur md:sticky md:top-0 md:h-screen">
+    <aside className="hidden md:flex md:w-64 md:shrink-0 md:flex-col md:border-r md:border-border/50 md:bg-card/30 md:backdrop-blur-xl md:sticky md:top-0 md:h-screen">
       <div className="px-5 pt-6 pb-4">
-        <Link href="/" className="flex items-center gap-2">
-          <span className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-foreground text-background font-semibold">
-            A
-          </span>
-          <span className="text-sm font-semibold tracking-tight">Artisan</span>
-        </Link>
+        <MarkosLogo size="sm" />
       </div>
 
       <Link
@@ -124,8 +121,11 @@ export function AppSidebar() {
         </nav>
       </div>
 
-      <div className="mt-auto px-5 pb-5 pt-3 text-[10px] uppercase tracking-wide text-muted-foreground/70">
-        Evidence-first outbound
+      <div className="mt-auto px-5 pb-5 pt-3 space-y-3">
+        <ThemeToggle className="w-full justify-center" />
+        <p className="text-[10px] uppercase tracking-wide text-muted-foreground/70 text-center">
+          Evidence-first outbound
+        </p>
       </div>
     </aside>
   );

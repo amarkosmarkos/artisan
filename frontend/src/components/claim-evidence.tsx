@@ -9,8 +9,6 @@ import {
   ExternalLink,
   FileText,
   Loader2,
-  Wrench,
-  XOctagon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -20,12 +18,14 @@ import {
   type EvidenceRecord,
   type ObservationRow,
 } from "@/lib/api";
-import type { ClaimStatus, StatementSupportStatus } from "@/lib/types";
-
-type VerificationStatus = ClaimStatus | StatementSupportStatus;
+export type ClaimEvidenceStatus =
+  | "supported"
+  | "neutral"
+  | "unsupported"
+  | "general";
 
 const STATUS_META: Record<
-  VerificationStatus,
+  ClaimEvidenceStatus,
   {
     label: string;
     variant: "success" | "default" | "muted" | "warning" | "destructive";
@@ -33,58 +33,29 @@ const STATUS_META: Record<
     explain: string;
   }
 > = {
-  entailed: {
+  supported: {
     label: "supported",
     variant: "success",
     icon: <Check className="h-3 w-3" />,
-    explain: "NLI entailed: cited evidence directly supports this claim.",
-  },
-  repaired: {
-    label: "repaired",
-    variant: "default",
-    icon: <Wrench className="h-3 w-3" />,
-    explain:
-      "Original draft was unsupported; rewritten to match available evidence.",
+    explain: "Backed by the cited retrieval ref(s).",
   },
   neutral: {
     label: "neutral",
     variant: "muted",
     icon: <AlertTriangle className="h-3 w-3" />,
-    explain:
-      "NLI neutral: evidence neither implies nor contradicts the claim. Weak support.",
+    explain: "Cited refs neither imply nor contradict the claim.",
   },
   unsupported: {
     label: "unsupported",
     variant: "warning",
     icon: <AlertTriangle className="h-3 w-3" />,
-    explain:
-      "No grounded evidence was found for this claim. Verify before sending.",
+    explain: "Sender/target-specific claim with no backing retrieval ref.",
   },
-  contradicted: {
-    label: "contradicted",
-    variant: "destructive",
-    icon: <XOctagon className="h-3 w-3" />,
-    explain:
-      "NLI contradicted: evidence directly contradicts the claim. Do not send as-is.",
-  },
-  supported: {
-    label: "supported",
-    variant: "success",
+  general: {
+    label: "general knowledge",
+    variant: "muted",
     icon: <Check className="h-3 w-3" />,
-    explain: "Supported by available workflow context.",
-  },
-  not_checkable: {
-    label: "not checkable",
-    variant: "muted",
-    icon: <AlertTriangle className="h-3 w-3" />,
-    explain: "Non-factual or rhetorical; not verified as a fact claim.",
-  },
-  sender_context_not_verified: {
-    label: "sender context not verified",
-    variant: "muted",
-    icon: <AlertTriangle className="h-3 w-3" />,
-    explain:
-      "Sender / value-prop positioning; no sender context available to verify against. Not a safety failure.",
+    explain: "Broad industry knowledge — evidence check not required.",
   },
 };
 
@@ -149,7 +120,7 @@ export function ClaimEvidence({
 }: {
   claim: string;
   evidenceIds: string[];
-  status?: VerificationStatus;
+  status?: ClaimEvidenceStatus;
   score?: number | null;
   evidence: Map<string, EvidenceRecord>;
   defaultOpen?: boolean;

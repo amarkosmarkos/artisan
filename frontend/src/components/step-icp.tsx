@@ -26,6 +26,7 @@ import {
 } from "@/components/claim-evidence";
 import { ExpandableEvidence, EvidenceList } from "./evidence-popover";
 import { SuggestedTargetsPanel } from "./suggested-targets-panel";
+import { SectionHeading } from "@/components/section-heading";
 import type {
   FieldWithEvidence,
   ICP,
@@ -101,20 +102,31 @@ export function StepIcp({ sender, onContinue, running }: Props) {
         </h2>
       </div>
 
-      <div className="grid gap-6 md:grid-cols-2">
+      <div className="space-y-8">
         <ICPCard icp={sender.icp} evidenceById={evidenceById} />
         <div className="space-y-4">
-          {vpsForDisplay(sender).map((vp, i) => (
-            <VPCard
-              key={vp.id || `vp-${i}`}
-              vp={vp}
-              evidenceById={evidenceById}
-              showLabel={
-                (sender.value_propositions?.length ?? 0) > 1 ||
-                Boolean(vp.label)
-              }
-            />
-          ))}
+          <SectionHeading
+            level="section"
+            title={
+              vpsForDisplay(sender).length > 1
+                ? "Value propositions"
+                : "Value proposition"
+            }
+            description="Distinct offerings inferred from sender evidence."
+          />
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {vpsForDisplay(sender).map((vp, i) => (
+              <VPCard
+                key={vp.id || `vp-${i}`}
+                vp={vp}
+                evidenceById={evidenceById}
+                showLabel={
+                  (sender.value_propositions?.length ?? 0) > 1 ||
+                  Boolean(vp.label)
+                }
+              />
+            ))}
+          </div>
           {vpsForDisplay(sender).length === 0 && (
             <Card>
               <CardHeader>
@@ -131,6 +143,7 @@ export function StepIcp({ sender, onContinue, running }: Props) {
 
       <SuggestedTargetsPanel
         senderCompanyId={sender.company_id}
+        initialDiscovery={sender.suggested_targets ?? null}
         onGenerateOutreach={onContinue}
         onPrefillEvaluate={({ target_url, persona }) => {
           setTargetUrl(target_url);
@@ -246,14 +259,15 @@ function ICPCard({
     { key: "negative_icp",      label: "Negative ICP",      field: icp.negative_icp },
   ];
   return (
-    <Card>
+    <Card className="accent-sender bg-sender-soft">
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">Ideal Customer Profile</CardTitle>
+        <CardTitle className="text-lg">Ideal Customer Profile</CardTitle>
         <CardDescription>Structured, evidence-grounded</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         {fields.map(({ key, label, field }) => (
-          <div key={key}>
+          <div key={key} className="rounded-lg border border-border/50 bg-background/40 p-3">
             <div className="flex items-center justify-between gap-3">
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 {label}
@@ -283,6 +297,7 @@ function ICPCard({
             </div>
           </div>
         ))}
+        </div>
       </CardContent>
     </Card>
   );

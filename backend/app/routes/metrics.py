@@ -93,40 +93,58 @@ def runs_summary() -> dict:
     by_kind: dict[str, int] = {"sender": 0, "target": 0}
     tokens_in = tokens_out = 0
     cost_usd = 0.0
+    llm_calls = 0
     pages = obs = 0
-    extracted = supported = 0
+    declared = extracted = uncovered = 0
+    emails_total = emails_safe = 0
+    confidences: list[float] = []
     for r in rows:
         by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
         m = json.loads(r["metrics"] or "{}")
         tokens_in += int(m.get("tokens_in") or 0)
         tokens_out += int(m.get("tokens_out") or 0)
         cost_usd += float(m.get("cost_usd") or 0.0)
+        llm_calls += int(m.get("llm_calls") or 0)
         pages += int(m.get("pages_fetched") or 0)
         obs += int(m.get("observations_extracted") or 0)
+        declared += int(m.get("declared_claims_count") or 0)
         extracted += int(
-            m.get("extracted_statements_count") or m.get("claims_total") or 0
+            m.get("email_claims_count")
+            or m.get("extracted_statements_count")
+            or 0
         )
-        supported += int(
-            m.get("supported_statements_count") or m.get("claims_supported") or 0
+        uncovered += int(
+            m.get("unsupported_claims_count")
+            or m.get("uncovered_statements_count")
+            or 0
         )
+        emails_total += int(m.get("emails_total") or 0)
+        emails_safe += int(m.get("emails_safe_count") or 0)
+        conf = m.get("safety_confidence_avg")
+        if isinstance(conf, (int, float)):
+            confidences.append(float(conf))
+    safe_rate = (
+        round(emails_safe / emails_total, 3) if emails_total else None
+    )
+    avg_conf = (
+        round(sum(confidences) / len(confidences), 3) if confidences else None
+    )
     return {
         "total_runs": total,
         "by_kind": by_kind,
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "cost_usd": round(cost_usd, 4),
+        "llm_calls": llm_calls,
         "pages_fetched": pages,
         "observations_extracted": obs,
-        "extracted_statements_count": extracted,
-        "supported_statements_count": supported,
-        "evidence_support_rate": (
-            round(supported / extracted, 3) if extracted else None
-        ),
-        "claims_total": extracted,
-        "claims_supported": supported,
-        "claim_support_rate": (
-            round(supported / extracted, 3) if extracted else None
-        ),
+        "declared_claims_count": declared,
+        "email_claims_count": extracted,
+        "unsupported_claims_count": uncovered,
+        "emails_total": emails_total,
+        "emails_safe_count": emails_safe,
+        "email_safe_rate": safe_rate,
+        "safety_confidence_avg": avg_conf,
     }
 
 
@@ -169,10 +187,10 @@ def _enrich_metrics(
     if out.get("observation_validation_rate") is None and obs_ext > 0 and obs_val > 0:
         out["observation_validation_rate"] = round(obs_val / obs_ext, 3)
 
-    claims_total = int(out.get("claims_total") or 0)
-    claims_supported = int(out.get("claims_supported") or 0)
-    if out.get("claim_support_rate") is None and claims_total > 0:
-        out["claim_support_rate"] = round(claims_supported / claims_total, 3)
+    emails_total = int(out.get("emails_total") or 0)
+    emails_safe = int(out.get("emails_safe_count") or 0)
+    if out.get("email_safe_rate") is None and emails_total > 0:
+        out["email_safe_rate"] = round(emails_safe / emails_total, 3)
 
     return out
 
@@ -184,19 +202,23 @@ def _summary_metrics(m: dict) -> dict:
         "tokens_in": m.get("tokens_in"),
         "tokens_out": m.get("tokens_out"),
         "cost_usd": m.get("cost_usd"),
+        "llm_calls": m.get("llm_calls"),
         "pages_fetched": m.get("pages_fetched"),
         "sections_created": m.get("sections_created"),
         "observations_extracted": m.get("observations_extracted"),
         "observations_validated": m.get("observations_validated"),
         "observations_rejected": m.get("observations_rejected"),
         "observation_validation_rate": m.get("observation_validation_rate"),
-        "extracted_statements_count": m.get("extracted_statements_count"),
-        "supported_statements_count": m.get("supported_statements_count"),
-        "evidence_support_rate": m.get("evidence_support_rate"),
+        "declared_claims_count": m.get("declared_claims_count"),
+        "email_claims_count": m.get("email_claims_count")
+        or m.get("extracted_statements_count"),
+        "unsupported_claims_count": m.get("unsupported_claims_count")
+        or m.get("uncovered_statements_count"),
+        "safety_confidence_avg": m.get("safety_confidence_avg"),
         "final_email_safe": m.get("final_email_safe"),
-        "claims_total": m.get("claims_total"),
-        "claims_supported": m.get("claims_supported"),
-        "claim_support_rate": m.get("claim_support_rate"),
+        "emails_total": m.get("emails_total"),
+        "emails_safe_count": m.get("emails_safe_count"),
+        "email_safe_rate": m.get("email_safe_rate"),
         "angle_overlap": m.get("angle_overlap"),
         "stages": len(m.get("stages") or []),
     }

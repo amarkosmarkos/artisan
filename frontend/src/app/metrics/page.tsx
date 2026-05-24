@@ -42,8 +42,9 @@ export default function MetricsPage() {
           Admin
         </h1>
         <p className="mt-1 text-sm text-muted-foreground max-w-2xl">
-          Operator view: latency, tokens, cost, claim support, planner
-          decisions, and per-stage timing for every flow that has finished.
+          Operator view: latency, LLM call breakdown, tokens, cost, claim
+          support, planner decisions, and per-stage timing for every flow that
+          has finished.
           MLflow tracking is also available at{" "}
           <a
             href="http://localhost:5000"
@@ -57,7 +58,7 @@ export default function MetricsPage() {
         </p>
       </header>
 
-      <div className="grid gap-3 grid-cols-2 md:grid-cols-4">
+      <div className="grid gap-3 grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
         <Stat
           tone="sender"
           label="Total runs"
@@ -79,6 +80,12 @@ export default function MetricsPage() {
           }
         />
         <Stat
+          tone="default"
+          label="LLM calls"
+          value={a ? formatNumber(a.llm_calls) : "…"}
+          sub="Cumulative across runs"
+        />
+        <Stat
           tone="persona"
           label="Cost"
           value={a ? `$${a.cost_usd.toFixed(2)}` : "…"}
@@ -86,15 +93,15 @@ export default function MetricsPage() {
         />
         <Stat
           tone="target"
-          label="Claim support"
+          label="Emails safe"
           value={
-            a && a.claim_support_rate !== null
-              ? `${(a.claim_support_rate * 100).toFixed(0)}%`
+            a && a.email_safe_rate !== null
+              ? `${(a.email_safe_rate * 100).toFixed(0)}%`
               : "–"
           }
           sub={
             a
-              ? `${a.claims_supported}/${a.claims_total} claims`
+              ? `${a.emails_safe_count}/${a.emails_total} safe`
               : undefined
           }
         />
@@ -104,7 +111,8 @@ export default function MetricsPage() {
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Recent runs</CardTitle>
           <CardDescription>
-            Click a row for the full stages timeline + planner decisions.
+            Click a row for LLM usage breakdown, stages timeline, and planner
+            decisions.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -143,19 +151,34 @@ export default function MetricsPage() {
                           <>
                             <span>·</span>
                             <span>
-                              {r.summary.claims_supported ?? 0}/
-                              {r.summary.claims_total ?? 0} claims
+                              {r.summary.emails_safe_count ?? 0}/
+                              {r.summary.emails_total ?? 0} safe
+                              {typeof r.summary.safety_confidence_avg ===
+                                "number" && (
+                                <>
+                                  {" · conf "}
+                                  {r.summary.safety_confidence_avg.toFixed(2)}
+                                </>
+                              )}
                             </span>
                           </>
                         )}
                       </p>
                     </div>
-                    <div className="hidden sm:grid grid-cols-3 gap-3 text-right text-xs text-muted-foreground">
+                    <div className="hidden sm:grid grid-cols-4 gap-3 text-right text-xs text-muted-foreground">
                       <Mini
                         label="Latency"
                         value={
                           r.summary.latency_ms
                             ? `${(r.summary.latency_ms / 1000).toFixed(1)}s`
+                            : "—"
+                        }
+                      />
+                      <Mini
+                        label="LLM calls"
+                        value={
+                          r.summary.llm_calls != null
+                            ? String(r.summary.llm_calls)
                             : "—"
                         }
                       />

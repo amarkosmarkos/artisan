@@ -161,6 +161,24 @@ def _is_candidate_company_domain(url: str, *, exclude: Iterable[str]) -> bool:
 # ---------- Prompt construction ----------
 
 
+def _summarize_sender_offering(sender_url: str, vps: list[ValueProposition]) -> str:
+    """What the sender sells — helps distinguish buyer targets from vendors."""
+    domain = _domain_of(sender_url) or "(unknown domain)"
+    lines = [
+        f"- Sender domain: {domain}",
+        "- The sender is a VENDOR. Suggested companies must be potential BUYERS, "
+        "not other vendors offering similar products or services.",
+    ]
+    for vp in vps[:4]:
+        head = vp.label or "Offering"
+        lines.append(
+            f"- {head}: helps {vp.customer or '(buyer)'} with "
+            f"{vp.pain or '(pain)'} → {vp.outcome or '(outcome)'} "
+            f"via {vp.mechanism or '(mechanism)'}"
+        )
+    return "\n".join(lines)
+
+
 def _summarize_icp(icp: ICP) -> str:
     parts: list[str] = []
     for label, field in [
@@ -191,39 +209,50 @@ def _summarize_vps(vps: list[ValueProposition]) -> str:
 
 _DISCOVERY_INSTRUCTION = """You are an outbound discovery assistant.
 
-You are given a SENDER's Ideal Customer Profile (ICP) and Value Propositions.
-Use the web_search tool to identify up to 3 REAL companies that plausibly
-match the ICP and could benefit from one of the value propositions.
+You are given a SENDER company (a vendor), its Ideal Customer Profile (ICP),
+and its Value Propositions (VPs). Your job is to find up to 3 REAL companies
+that would be good outbound TARGETS — i.e. potential CUSTOMERS who match the
+ICP and would plausibly benefit from one of the sender's value propositions.
+
+Use the web_search tool. Base every suggestion on the ICP fields and VP
+pain/outcome/mechanism — not on generic industry lists.
 
 You MUST:
 - Only return companies you can support with a citation from your search.
 - Cite the homepage or an authoritative source for each company.
-- Prefer companies that show RECENT public signals (funding, hiring,
-  product launches, expansion, leadership changes) that align with the
-  ICP's common triggers.
-- For each company, propose up to 2 buyer ROLES or TITLES that would
-  plausibly own the pain. Use role/title only. Do NOT invent named
-  people. Only mention a person by name if the search clearly identifies
-  that named person currently in that role at that company, with a
-  citation.
+- Prefer companies whose public signals (hiring, funding, launches, expansion,
+  leadership changes, operational challenges) align with the ICP's common
+  triggers and a specific VP's pain point.
+- For each company, explain which ICP dimension it matches (industry, size,
+  buyer type, trigger) and which VP id/label it best fits.
+- For each company, propose up to 2 buyer ROLES or TITLES from the ICP's
+  likely_buyers when possible. Include seniority (ic, manager, director, vp,
+  c_level, founder). Use role/title only. Do NOT invent named people unless
+  the search clearly identifies someone currently in that role at that company.
 
 You MUST NOT:
+- Suggest the sender itself, its parent/subsidiary, or any domain matching
+  the sender domain listed below.
+- Suggest DIRECT COMPETITORS or other vendors that sell similar products,
+  platforms, or services to the same buyer. Targets are BUYERS, not peers.
+- Suggest companies listed in negative ICP (explicit non-customers).
 - Invent companies or claim a match without a citation.
-- Suggest the sender itself, its parent/subsidiary, a known competitor,
-  or any company whose domain you cannot verify.
 - Include LinkedIn, X/Twitter, Facebook, or Maps results as the primary
   citation for a company.
+- Search for "companies like the sender" or "alternatives to the sender" — search
+  for organizations that FIT THE ICP and would BUY what the sender sells.
 
 Output a concise natural-language briefing organized as:
 
 Company N: <Name> (<homepage_url>)
-- Why it fits: <1-2 sentences referencing the ICP / VP it matches>
-- Matched value proposition: <vp_id or the label you saw, or "none">
+- Why it fits: <1-2 sentences tying ICP + VP pain/outcome>
+- ICP match: <industry / size / buyer / trigger dimensions>
+- Matched value proposition: <vp_id or label from the list, or "none">
 - Confidence: high | medium | low
 - Source(s): <one or two short bullets, each ending with a citation>
 - Suggested roles:
-    * <role or title> - <why this role>
-    * <role or title> - <why this role>
+    * <role or title> (<seniority>) - <why this role>
+    * <role or title> (<seniority>) - <why this role>
 
 If you cannot find 3 well-sourced matches, return fewer. If you find
 none, state that plainly."""
@@ -232,12 +261,19 @@ none, state that plainly."""
 def _build_discovery_prompt(
     sender_url: str, icp: ICP, vps: list[ValueProposition]
 ) -> str:
+    sender_domain = _domain_of(sender_url) or "(unknown)"
     return (
-        f"SENDER homepage: {sender_url or '(unknown)'}\n\n"
-        f"SENDER ICP:\n{_summarize_icp(icp)}\n\n"
-        f"SENDER VALUE PROPOSITIONS (use the [id] when referring back):\n"
+        f"SENDER homepage: {sender_url or '(unknown)'}\n"
+        f"SENDER domain (never suggest this or competitors selling the same thing): "
+        f"{sender_domain}\n\n"
+        f"WHAT THE SENDER SELLS (vendor — do NOT suggest similar vendors):\n"
+        f"{_summarize_sender_offering(sender_url, vps)}\n\n"
+        f"SENDER ICP (find BUYERS matching these criteria):\n"
+        f"{_summarize_icp(icp)}\n\n"
+        f"SENDER VALUE PROPOSITIONS (match targets to a specific VP; cite [id]):\n"
         f"{_summarize_vps(vps)}\n\n"
-        "Now find up to 3 companies that fit and propose roles to contact."
+        "Search for up to 3 buyer companies that fit the ICP and would benefit "
+        "from one of these value propositions. Exclude competitors and the sender."
     )
 
 
@@ -320,18 +356,23 @@ CITATIONS provided alongside it.
 
 Hard rules:
 - Return at most 3 suggestions.
+- Each suggestion must be a potential BUYER/CUSTOMER, not a vendor or
+  competitor selling similar products to the sender.
 - Each suggestion must have homepage_url present in the BRIEFING and a
   matching citation in CITATIONS. Drop suggestions that lack a citation.
+- Drop suggestions that appear to be the sender, a direct competitor, or
+  listed in negative ICP.
 - evidence_urls must be a subset of CITATIONS urls.
 - For each suggestion include 0, 1, or up to 2 personas. Each persona is
-  a role/title (e.g. "VP of Engineering"). Only set a persona name when
-  the briefing names a specific public person currently in that role at
-  that company.
+  a role/title (e.g. "VP of Engineering") with a required seniority level.
+  Only set a persona name when the briefing names a specific public person
+  currently in that role at that company.
 - confidence is one of "high", "medium", "low".
 - If the briefing does not name a value proposition, set
   matched_value_proposition_id to null and the label to an empty string.
-- Seniority, when set, is one of: ic, manager, director, vp, c_level,
-  founder. If unsure, leave it null.
+- Seniority MUST be set for every persona. It is one of: ic, manager,
+  director, vp, c_level, founder. When the briefing is ambiguous, pick the
+  most probable level for that title.
 """
 
 
@@ -400,6 +441,55 @@ def _normalize_seniority(value: str | None) -> Seniority | None:
     if v in _SENIORITY_VALUES:
         return Seniority(v)
     return None
+
+
+def _infer_seniority_from_title(title: str) -> Seniority:
+    """Pick the most probable seniority band for a role/title string."""
+    t = title.lower()
+    if any(k in t for k in ("founder", "co-founder", "cofounder")):
+        return Seniority.FOUNDER
+    if any(
+        k in t
+        for k in (
+            "chief ",
+            "chief of",
+            " ceo",
+            "ceo ",
+            "ceo,",
+            " cto",
+            " cfo",
+            " cmo",
+            " cro",
+            " coo",
+        )
+    ) or t.startswith(("ceo", "cto", "cfo", "cmo", "cro", "coo")):
+        return Seniority.C_LEVEL
+    if re.search(r"\b(president|evp|executive vice)\b", t):
+        return Seniority.C_LEVEL
+    if re.search(r"\b(vp|vice president|svp|senior vice)\b", t):
+        return Seniority.VP
+    if re.search(r"\b(director|head of)\b", t) or "head" in t:
+        return Seniority.DIRECTOR
+    if re.search(r"\b(manager|team lead|lead\b)", t):
+        return Seniority.MANAGER
+    if any(
+        k in t
+        for k in (
+            "engineer",
+            "analyst",
+            "specialist",
+            "associate",
+            "coordinator",
+            "representative",
+            " rep",
+        )
+    ):
+        return Seniority.IC
+    return Seniority.VP
+
+
+def _resolve_seniority(value: str | None, title: str) -> Seniority:
+    return _normalize_seniority(value) or _infer_seniority_from_title(title)
 
 
 def _normalize_url(url: str) -> str:
@@ -479,7 +569,7 @@ def _suggestion_from_draft(
         personas.append(
             SuggestedPersona(
                 title=title,
-                seniority=_normalize_seniority(p.seniority),
+                seniority=_resolve_seniority(p.seniority, title),
                 name=(p.name or "").strip() or None,
                 rationale=(p.rationale or "").strip(),
             )
@@ -506,6 +596,7 @@ def discover_targets(
     *,
     llm: LLMClient,
     max_targets: int = 3,
+    usage: UsageAccumulator | None = None,
 ) -> SuggestedTargetsResponse:
     """Run the two-pass discovery for a sender and return a response.
 
@@ -524,7 +615,7 @@ def discover_targets(
         )
     sender_url, icp, vps = ctx
 
-    usage = UsageAccumulator()
+    usage_acc = usage if usage is not None else UsageAccumulator()
 
     raw, search_error = _run_web_search(llm, sender_url, icp, vps)
     if raw is None:
@@ -554,7 +645,7 @@ def discover_targets(
         )
 
     try:
-        draft = _extract_structured(llm, usage, raw)
+        draft = _extract_structured(llm, usage_acc, raw)
     except Exception as e:  # noqa: BLE001
         log.warning("discovery structured extract failed: %s", e)
         return SuggestedTargetsResponse(

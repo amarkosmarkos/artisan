@@ -6,15 +6,18 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowRight,
+  Building2,
   Check,
   ExternalLink,
   Globe,
   Loader2,
+  Plus,
   RefreshCw,
   Sparkles,
   User,
   X,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 import {
   Card,
@@ -45,6 +48,8 @@ import type {
 
 interface Props {
   senderCompanyId: string;
+  /** Pre-loaded discovery from the sender run (auto-triggered server-side). */
+  initialDiscovery?: SuggestedTargetsResponse | null;
   /** Same handler as the manual "Evaluate a target" form — starts target analysis + outreach. */
   onGenerateOutreach: (input: {
     target_url: string;
@@ -56,6 +61,9 @@ interface Props {
     persona: PersonaInput;
   }) => void;
   running: boolean;
+  /** When false, user must click Discover (e.g. sender detail page). Default: true if no initialDiscovery. */
+  autoDiscover?: boolean;
+  className?: string;
 }
 
 type CardState = "pending" | "saving" | "saved" | "error" | "ignored";
@@ -82,18 +90,41 @@ const SENIORITIES: { value: Seniority; label: string }[] = [
 
 export function SuggestedTargetsPanel({
   senderCompanyId,
+  initialDiscovery = null,
   onGenerateOutreach,
   onPrefillEvaluate,
   running,
+  autoDiscover = !initialDiscovery,
+  className,
 }: Props) {
   const queryClient = useQueryClient();
-  const [data, setData] = React.useState<SuggestedTargetsResponse | null>(null);
+  const [data, setData] = React.useState<SuggestedTargetsResponse | null>(
+    initialDiscovery,
+  );
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [hasRun, setHasRun] = React.useState(false);
+  const [hasRun, setHasRun] = React.useState(Boolean(initialDiscovery));
   const [cardState, setCardState] = React.useState<
     Record<string, LocalSuggestionState>
-  >({});
+  >(() => {
+    if (!initialDiscovery) return {};
+    const next: Record<string, LocalSuggestionState> = {};
+    initialDiscovery.suggestions.forEach((s) => {
+      next[s.domain] = { state: "pending" };
+    });
+    return next;
+  });
+
+  React.useEffect(() => {
+    if (!initialDiscovery) return;
+    setData(initialDiscovery);
+    setHasRun(true);
+    const next: Record<string, LocalSuggestionState> = {};
+    initialDiscovery.suggestions.forEach((s) => {
+      next[s.domain] = { state: "pending" };
+    });
+    setCardState(next);
+  }, [initialDiscovery]);
 
   const invalidateAfterAdd = React.useCallback(() => {
     SIDEBAR_KEYS.forEach((k) =>
@@ -123,6 +154,17 @@ export function SuggestedTargetsPanel({
       setLoading(false);
     }
   }, [senderCompanyId]);
+
+  React.useEffect(() => {
+    if (!autoDiscover || initialDiscovery || hasRun || loading) return;
+    void runDiscovery();
+  }, [autoDiscover, initialDiscovery, hasRun, loading, runDiscovery]);
+
+  const saveCustomTarget = useMutation({
+    mutationFn: (target_url: string) =>
+      addSenderTarget(senderCompanyId, target_url),
+    onSuccess: invalidateAfterAdd,
+  });
 
   const saveTargetOnly = useMutation({
     mutationFn: async (target: SuggestedTarget) => {
@@ -168,7 +210,10 @@ export function SuggestedTargetsPanel({
   return (
     <section
       aria-label="Suggested targets"
-      className="mt-10 rounded-xl border border-border bg-card/40 p-6"
+      className={cn(
+        "rounded-xl border border-border bg-card/40 p-6",
+        className ?? "mt-10",
+      )}
     >
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex items-start gap-3">
@@ -178,9 +223,8 @@ export function SuggestedTargetsPanel({
           <div>
             <h3 className="text-lg font-medium">Suggested targets</h3>
             <p className="text-sm text-muted-foreground">
-              Pick a company and one recipient, then generate outreach. Each
-              run is for a single persona — choose a suggested role or enter
-              your own.
+              Discover ICP-fit companies, add your own target URL, pick one
+              recipient, and generate outreach — or save targets for later.
             </p>
           </div>
         </div>
@@ -198,7 +242,7 @@ export function SuggestedTargetsPanel({
           ) : hasRun ? (
             <>
               <RefreshCw className="h-3.5 w-3.5" />
-              Re-run
+              Re-run discovery
             </>
           ) : (
             <>
@@ -210,7 +254,22 @@ export function SuggestedTargetsPanel({
       </header>
 
       <div className="mt-6">
-        {!hasRun && !loading && <IdleState />}
+        <CustomTargetBlock
+          running={running}
+          saving={saveCustomTarget.isPending}
+          onGenerateOutreach={onGenerateOutreach}
+          onSaveOnly={(input) => {
+            saveCustomTarget.mutate(input.target_url, {
+              onSuccess: () => onPrefillEvaluate?.(input),
+            });
+          }}
+        />
+
+        {autoDiscover && !hasRun && !loading && <IdleState />}
+
+        {!autoDiscover && !hasRun && !loading && !data && !error && (
+          <DiscoverPrompt onDiscover={runDiscovery} />
+        )}
 
         {loading && <LoadingState />}
 
@@ -432,11 +491,9 @@ function SuggestionCard({
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="text-sm font-medium">{p.title}</span>
-                    {p.seniority && (
-                      <Badge variant="muted" className="font-normal">
-                        {p.seniority}
-                      </Badge>
-                    )}
+                    <Badge variant="muted" className="font-normal">
+                      {p.seniority}
+                    </Badge>
                     {p.name && (
                       <Badge variant="persona" className="font-normal">
                         {p.name}
@@ -580,7 +637,163 @@ function resolvePersona(
   return {
     role: p.title.trim(),
     seniority: p.seniority ?? "vp",
+    ...(p.name ? { name: p.name } : {}),
   };
+}
+
+// ---------- Custom target (any URL) ----------
+
+function CustomTargetBlock({
+  running,
+  saving,
+  onGenerateOutreach,
+  onSaveOnly,
+}: {
+  running: boolean;
+  saving: boolean;
+  onGenerateOutreach: (input: {
+    target_url: string;
+    persona: PersonaInput;
+  }) => void;
+  onSaveOnly: (input: { target_url: string; persona: PersonaInput }) => void;
+}) {
+  const [targetUrl, setTargetUrl] = React.useState("");
+  const [name, setName] = React.useState("");
+  const [role, setRole] = React.useState("VP of Sales");
+  const [seniority, setSeniority] = React.useState<Seniority>("vp");
+  const [saved, setSaved] = React.useState(false);
+
+  const persona = React.useMemo((): PersonaInput => {
+    const trimmedName = name.trim();
+    return {
+      role: role.trim(),
+      seniority,
+      ...(trimmedName ? { name: trimmedName } : {}),
+    };
+  }, [name, role, seniority]);
+
+  const canSubmit =
+    Boolean(targetUrl.trim()) && Boolean(role.trim()) && !running && !saving;
+
+  const handleGenerate = () => {
+    if (!canSubmit) return;
+    onGenerateOutreach({ target_url: targetUrl.trim(), persona });
+  };
+
+  const handleSave = () => {
+    if (!canSubmit) return;
+    onSaveOnly({ target_url: targetUrl.trim(), persona });
+    setSaved(true);
+  };
+
+  return (
+    <div className="mb-6 rounded-lg border border-dashed border-[hsl(var(--target))]/40 bg-target-soft p-4">
+      <div className="flex items-start gap-2">
+        <Building2 className="mt-0.5 h-4 w-4 text-target" />
+        <div className="flex-1">
+          <p className="text-sm font-medium">Add custom target</p>
+          <p className="text-xs text-muted-foreground">
+            Any company URL — not from suggestions. Add the company first,
+            then one recipient for outreach.
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Input
+          placeholder="https://target-company.com"
+          value={targetUrl}
+          onChange={(e) => {
+            setTargetUrl(e.target.value);
+            setSaved(false);
+          }}
+          disabled={running || saving}
+          className="sm:col-span-2 lg:col-span-4"
+        />
+        <Input
+          placeholder="Recipient name (optional)"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          disabled={running || saving}
+        />
+        <Input
+          placeholder="Recipient role"
+          value={role}
+          onChange={(e) => setRole(e.target.value)}
+          disabled={running || saving}
+        />
+        <Select
+          value={seniority}
+          onValueChange={(v) => setSeniority(v as Seniority)}
+          disabled={running || saving}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SENIORITIES.map((s) => (
+              <SelectItem key={s.value} value={s.value}>
+                {s.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <Button size="sm" onClick={handleGenerate} disabled={!canSubmit}>
+          {running ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Generating…
+            </>
+          ) : (
+            <>
+              Generate outreach
+              <ArrowRight className="h-3.5 w-3.5" />
+            </>
+          )}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleSave}
+          disabled={!canSubmit}
+        >
+          {saving ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <>
+              <Plus className="h-3.5 w-3.5" />
+              Save target only
+            </>
+          )}
+        </Button>
+        {saved && (
+          <Badge variant="success" className="font-normal">
+            <Check className="h-3 w-3" />
+            Saved to campaign
+          </Badge>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DiscoverPrompt({ onDiscover }: { onDiscover: () => void }) {
+  return (
+    <div className="rounded-lg border border-dashed border-border/80 bg-background/40 px-6 py-8 text-center">
+      <Sparkles className="mx-auto h-5 w-5 text-muted-foreground" />
+      <p className="mt-3 text-sm font-medium">Find ICP-fit companies</p>
+      <p className="mx-auto mt-1 max-w-md text-xs text-muted-foreground">
+        Search the web for prospects matching this sender&apos;s profile.
+      </p>
+      <Button variant="outline" size="sm" className="mt-4" onClick={onDiscover}>
+        <Sparkles className="h-3.5 w-3.5" />
+        Discover targets
+      </Button>
+    </div>
+  );
 }
 
 // ---------- Empty / status states ----------
@@ -588,13 +801,11 @@ function resolvePersona(
 function IdleState() {
   return (
     <div className="rounded-lg border border-dashed border-border/80 bg-background/40 px-6 py-10 text-center">
-      <Sparkles className="mx-auto h-5 w-5 text-muted-foreground" />
-      <p className="mt-3 text-sm font-medium">
-        Discover companies that fit this ICP
-      </p>
+      <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
+      <p className="mt-3 text-sm font-medium">Discovering target companies…</p>
       <p className="mx-auto mt-1 max-w-md text-xs text-muted-foreground">
-        We&apos;ll suggest companies and buyer roles. You pick one recipient
-        per card and generate outreach — or save the target for later.
+        This runs automatically after sender research. Suggestions will appear
+        here shortly.
       </p>
     </div>
   );

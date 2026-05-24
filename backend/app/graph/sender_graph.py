@@ -74,9 +74,6 @@ async def run_sender_graph(
     if not vps and vp.customer:
         vps = [vp]
     tracker = final["tracker"]
-    tracker.metrics.tokens_in = final["usage"].tokens_in
-    tracker.metrics.tokens_out = final["usage"].tokens_out
-    tracker.metrics.cost_usd = round(final["usage"].cost_usd, 4)
 
     return SenderResponse(
         company_id=final["company_id"],

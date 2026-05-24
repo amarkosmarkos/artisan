@@ -3,6 +3,8 @@ import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
 import { AppSidebar } from "@/components/app-sidebar";
+import { AppBackground } from "@/components/app-background";
+import { MobileTopBar } from "@/components/mobile-top-bar";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -17,8 +19,12 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Artisan",
+  title: "Markos Artisan",
   description: "Auditable outbound strategy grounded in public evidence.",
+  icons: {
+    icon: "/markos_artisan_favicon.png",
+    apple: "/markos_artisan_favicon.png",
+  },
 };
 
 export default function RootLayout({
@@ -29,16 +35,27 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`dark ${inter.variable} ${mono.variable}`}
+      className={`${inter.variable} ${mono.variable}`}
       suppressHydrationWarning
     >
-      <body className="min-h-screen bg-background text-foreground font-sans antialiased grid-bg">
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem("markos-artisan-theme");if(t==="dark"||(t!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches)){document.documentElement.classList.add("dark")}}catch(e){}})();`,
+          }}
+        />
+      </head>
+      <body className="min-h-screen bg-background text-foreground font-sans antialiased">
+        <AppBackground />
         <Providers>
-          <div className="flex min-h-screen">
+          <div className="flex min-h-screen w-full">
             <AppSidebar />
-            <main className="flex-1 px-6 py-10 md:px-10">
-              <div className="mx-auto w-full max-w-6xl">{children}</div>
-            </main>
+            <div className="flex min-h-screen flex-1 flex-col">
+              <MobileTopBar />
+              <main className="flex-1 px-6 py-10 md:px-10">
+                <div className="mx-auto w-full max-w-6xl">{children}</div>
+              </main>
+            </div>
           </div>
         </Providers>
       </body>

@@ -4,7 +4,7 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
+    --background: 240 12% 96%;
     --foreground: 240 10% 4%;
     --card: 0 0% 100%;
     --card-foreground: 240 10% 4%;
@@ -29,13 +29,22 @@
     --persona: 32 92% 56%;
     --evidence: 220 14% 96%;
     --claim: 250 50% 96%;
+    --angle-pain: 350 75% 48%;
+    --angle-trigger: 32 92% 44%;
+    --angle-outcome: 158 64% 38%;
+    /* Ambient background (light). */
+    --glow-a: 245 70% 58%;
+    --glow-b: 158 55% 42%;
+    --glow-c: 220 30% 88%;
+    --glow-shadow: 245 60% 50%;
+    --grid-dot: 240 5% 70%;
     --radius: 0.75rem;
   }
 
   .dark {
-    --background: 240 10% 3.9%;
+    --background: 240 8% 8%;
     --foreground: 0 0% 98%;
-    --card: 240 7% 6%;
+    --card: 240 7% 11%;
     --card-foreground: 0 0% 98%;
     --primary: 0 0% 98%;
     --primary-foreground: 240 5.9% 10%;
@@ -57,6 +66,15 @@
     --persona: 32 92% 64%;
     --evidence: 245 22% 14%;
     --claim: 250 30% 13%;
+    --angle-pain: 350 80% 62%;
+    --angle-trigger: 38 92% 58%;
+    --angle-outcome: 158 64% 52%;
+    /* Ambient background (dark). */
+    --glow-a: 245 78% 62%;
+    --glow-b: 158 64% 48%;
+    --glow-c: 240 20% 12%;
+    --glow-shadow: 245 70% 55%;
+    --grid-dot: 240 5% 22%;
   }
 
   * {
@@ -87,9 +105,88 @@
   }
 
   .grid-bg {
-    background-image:
-      radial-gradient(circle at 1px 1px, hsl(var(--foreground) / 0.06) 1px, transparent 0);
-    background-size: 24px 24px;
+    background-color: hsl(var(--background));
+  }
+
+  /* Soft tinted canvas — two faint glows on top of the base tone */
+  .ambient-mesh {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(
+        ellipse 70% 55% at 15% -5%,
+        hsl(var(--glow-a) / 0.07),
+        transparent 55%
+      ),
+      radial-gradient(
+        ellipse 55% 45% at 90% 5%,
+        hsl(var(--glow-b) / 0.05),
+        transparent 50%
+      ),
+      hsl(var(--background));
+  }
+  .dark .ambient-mesh {
+    background:
+      radial-gradient(
+        ellipse 70% 55% at 15% -5%,
+        hsl(var(--glow-a) / 0.09),
+        transparent 55%
+      ),
+      radial-gradient(
+        ellipse 55% 45% at 90% 5%,
+        hsl(var(--glow-b) / 0.06),
+        transparent 50%
+      ),
+      hsl(var(--background));
+  }
+
+  .ambient-grid {
+    position: absolute;
+    inset: 0;
+    opacity: 0.45;
+    background-image: radial-gradient(
+      circle at 1px 1px,
+      hsl(var(--grid-dot) / 0.35) 1px,
+      transparent 0
+    );
+    background-size: 32px 32px;
+    mask-image: radial-gradient(ellipse 90% 80% at 50% 40%, black 10%, transparent 70%);
+    -webkit-mask-image: radial-gradient(
+      ellipse 90% 80% at 50% 40%,
+      black 10%,
+      transparent 70%
+    );
+  }
+  .dark .ambient-grid {
+    opacity: 0.35;
+    background-image: radial-gradient(
+      circle at 1px 1px,
+      hsl(var(--grid-dot) / 0.5) 1px,
+      transparent 0
+    );
+  }
+
+  /* Home page search bar */
+  .home-search {
+    @apply flex items-center gap-2 rounded-2xl border border-border/70 bg-card/80 p-1.5 shadow-[0_8px_30px_-12px_hsl(var(--foreground)/0.08)] backdrop-blur-md transition-shadow duration-300;
+  }
+  .home-search:focus-within {
+    @apply border-border shadow-[0_12px_40px_-14px_hsl(var(--sender)/0.18)] ring-2 ring-[hsl(var(--sender)/0.12)];
+  }
+  .dark .home-search {
+    @apply bg-card/60 shadow-[0_8px_30px_-12px_hsl(0_0%_0%/0.35)];
+  }
+  .dark .home-search:focus-within {
+    @apply shadow-[0_12px_40px_-14px_hsl(var(--sender)/0.22)] ring-[hsl(var(--sender)/0.15)];
+  }
+  .home-search-icon {
+    @apply ml-3 h-4 w-4 shrink-0 text-muted-foreground;
+  }
+  .home-search-input {
+    @apply h-11 min-w-0 flex-1 border-0 bg-transparent px-1 text-base shadow-none placeholder:text-muted-foreground/70 focus-visible:ring-0;
+  }
+  .home-search-button {
+    @apply h-11 shrink-0 rounded-xl px-5 font-medium shadow-sm transition-all hover:shadow-md active:scale-[0.98];
   }
 
   .glass {

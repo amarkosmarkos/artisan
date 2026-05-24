@@ -1,11 +1,22 @@
 """Email writer.
 
-Each outreach angle gets its own LLM call. The writer sees the selected sender
-value proposition, ICP, persona guidance, the single angle to write, and the
-retrieved target observations.
+Each outreach angle gets its own LLM call. The writer sees the selected
+sender value proposition, ICP, persona guidance, the single angle to
+write, the retrieved target observations, and the CONTEXT INDEX of
+ref_ids it is allowed to cite.
 
-Safety verification runs later in ``email_guard`` on the final subject/body.
-The writer must not emit claims or evidence refs.
+The writer's output is:
+
+  - subject + body (the send-ready email);
+  - ``claims``: every factual claim used in the email, each with:
+      * scope: ``general`` / ``sender`` / ``target`` — declared by the writer
+      * evidence_refs: ref_ids from the CONTEXT INDEX (none for ``general``)
+
+The pipeline immediately hydrates ``evidence_refs`` into ``evidence``
+snippets from the same retrieval, so the guardrail receives the claim
+together with the exact text the writer cited. The guardrail only judges
+whether each claim is grounded by its own cited evidence — no
+re-reading of the full briefing.
 """
 from __future__ import annotations
 
@@ -13,21 +24,31 @@ import logging
 import uuid
 
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from ..config import settings
 from ..schemas import (
     Angle,
     AngleType,
     Email,
+    EmailClaim,
     ICP,
     Observation,
     PersonaInput,
+    StatementContextRef,
     StrategyArtifact,
     ValueProposition,
 )
 from ..services.llm import LLMClient, UsageAccumulator
+from .context_index import ContextBundle, build_context_index
 
 log = logging.getLogger(__name__)
+
+
+class ClaimUsedDraft(BaseModel):
+    text: str = Field(min_length=4, max_length=500)
+    scope: Literal["general", "sender", "target"] = "general"
+    evidence_refs: list[str] = Field(default_factory=list, max_length=8)
 
 
 class _EmailDraft(BaseModel):
@@ -35,13 +56,15 @@ class _EmailDraft(BaseModel):
     skip_reason: str = ""
     subject: str = Field(default="", max_length=180)
     body: str = Field(default="", max_length=2200)
+    # Hard requirement: the guardrail verifies ONLY these claims.
+    claims_used: list[ClaimUsedDraft] = Field(min_length=1, max_length=8)
 
 
 _WRITER_SYSTEM = """You are an expert B2B outbound sales writer.
 
 INPUTS YOU RECEIVE:
 - TARGET COMPANY NAME: the recipient's company.
-- RECIPIENT NAME: optional first name for the greeting.
+- RECIPIENT NAME: optional; do not use for the greeting.
 - SENDER VALUE PROPOSITION (label, customer, pain, outcome, mechanism).
 - SENDER EVIDENCE: real facts about the sender's product, customers, results,
   or mechanism.
@@ -50,107 +73,64 @@ INPUTS YOU RECEIVE:
 - ADDITIONAL TARGET OBSERVATIONS: extra facts about the target.
 - PERSONA: seniority, role, and messaging guidance for the recipient.
 - MESSAGING ANGLE / SELECTED VP REASON: why this angle and VP were chosen.
+- CONTEXT INDEX: numbered [ref_id] entries with snippets. This is the
+  COMPLETE set of premises you may cite when declaring claims.
 
 YOUR JOB:
-Write ONE send-ready sales email built around a clear commercial story.
-The output must be complete plain text — no placeholders, no brackets, no
-fields left for the sender to fill in.
-Do this even when fit_assessment is weak or contact_decision is skip; those
-are diagnostic, not permission to refuse.
+Write ONE send-ready sales email AND declare every factual claim you used.
+The guardrail will check each claim against the evidence YOU cited — not
+the full briefing — so be honest about what each claim relies on.
 
-REASONING ORDER (follow before writing):
-1. IDENTIFY THE SALES ANGLE — the main reason this target might care now.
-   Read STRATEGY ANGLE, MESSAGING ANGLE, and SELECTED VP REASON. The angle is
-   a concrete commercial problem or opportunity, not a generic category.
-   Examples: reducing inference cost, improving deployment efficiency,
-   lowering compute footprint, compressing large models, scaling AI systems
-   more economically, improving model serving economics.
-2. CONNECT THE VALUE PROPOSITION TO THAT ANGLE — explain why the selected
-   VP resolves or advances that specific problem for this target. Do NOT
-   describe the sender company in the abstract. Show the implication for
-   the target's business or technical situation.
-3. SELECT ONLY THE STRONGEST SUPPORTING CONTEXT — pick one or two facts
-   (target observation, sender evidence, persona detail) that best prove the
-   angle. Ignore everything else, even if it appears in the input.
-4. BUILD ONE COHERENT NARRATIVE:
-   (a) target context or market reality
-   (b) why that creates a relevant business/technical problem
-   (c) how the selected value proposition maps to that problem
-   (d) simple, low-friction CTA
+The output must be complete plain text — no placeholders, no brackets.
 
-The email must persuade, not inform. Every sentence must advance the story.
-Never list loosely connected facts.
+GREETING + SIGN-OFF (HARD):
+- Open with "Dear <role> of/at <company>," using PERSONA.role and
+  TARGET COMPANY NAME. Never "Hi <name>," and never "Hi there,".
+- Close with a blank line, then sign exactly: Markos Artisan.
 
-HIRING AS TRIGGER (RESTRICTED):
-Do NOT use hiring, headcount growth, or "as you expand your workforce" unless
-hiring is genuinely the core sales angle AND directly tied to the selected VP
-(e.g. team growth, implementation capacity, organizational scaling).
-For technical AI infrastructure value propositions, prefer stronger angles:
-compute cost, inference efficiency, deployment complexity, latency, scale,
-model performance, serving economics.
-If a hiring observation exists but a stronger technical or economic angle is
-available, use the stronger angle and ignore the hiring signal.
+BANNED LANGUAGE (or close variants):
+"AI solutions", "align with your objectives", "enhance operational
+efficiency", "explore this further", "I hope this message finds you well",
+"I would be happy to share more", "as you expand your workforce" (unless
+hiring is the explicit core angle), "Let me know your thoughts".
 
-BANNED / STRONGLY DISCOURAGED LANGUAGE:
-Never use these or close variants:
-- "AI solutions"
-- "align with your objectives" / "align with your goals"
-- "enhance operational efficiency"
-- "explore this further"
-- "organizations looking to implement AI effectively"
-- "I hope this message finds you well"
-- "I would be happy to share more"
-- "Would a short conversation be useful?"
-- "Let me know your thoughts"
-- "as you expand your workforce" (unless hiring is the core angle)
-Write in plain, direct language. No corporate filler. No exaggerated claims.
+EVIDENCE DISCIPLINE:
+- Target-specific or sender-specific facts MUST be backed by a ref_id
+  that exists in CONTEXT INDEX. Do not invent ref_ids. Do not invent
+  facts about the target or the sender that aren't in the context.
+- A general market-level statement (no company-specific facts) is allowed
+  with zero refs — declare it with scope=general.
 
-NO PLACEHOLDERS (HARD):
-The email must be ready to send as-is. Never output bracket placeholders such
-as [First Name], [Target Company], [Your Name], [Your Title], [Your Contact
-Information], or any similar token.
-- If RECIPIENT NAME is present, open with "Hi <name>,".
-- If RECIPIENT NAME is empty or "(none)", open with exactly "Hi,".
-- If TARGET COMPANY NAME is known, refer to the company by that name.
-- If a value is unknown, omit it naturally — do not substitute a placeholder.
+DECLARED CLAIMS (HARD — this is the only thing the guardrail sees):
+For every factual sentence in the email body (excluding greeting,
+sign-off, and pure CTA lines) add an entry to ``claims_used`` with:
+  - text: a verbatim or near-verbatim snippet from the body
+  - scope:
+      * "general"  — broad industry/market knowledge that does NOT name
+        the target or make a specific sender claim. evidence_refs MUST be empty.
+      * "sender"   — a specific assertion about the sender company, its
+        product, customers, results, or capability. evidence_refs MUST contain
+        at least one ref_id of type ``value_prop`` or sender ``observation``.
+      * "target"   — a specific assertion about the recipient company, its
+        situation, plans, stack, hiring, etc. evidence_refs MUST contain at
+        least one target ``observation`` ref_id.
+  - evidence_refs: 1–3 ref_ids from CONTEXT INDEX that materially support
+    the claim. For scope=general, leave empty.
 
-EVIDENCE DISCIPLINE (HARD):
-- Target-specific factual claims must come from provided target observations.
-  Never invent the target's needs, plans, tech stack, customers, hiring, or
-  intent.
-- Sender-specific facts (numbers, named methods, customers, outcomes) must
-  come from SENDER EVIDENCE. Do not invent metrics or capabilities.
-- If evidence is weak, use a general but relevant market-level statement
-  instead of inventing specificity.
+If you cannot find ref_ids that materially support a sender/target claim,
+DO NOT write that claim — soften the sentence to scope=general instead.
 
-PREFERRED STRUCTURE:
-Subject: name the specific commercial angle — not a generic benefit.
-
-Opening (1-2 sentences):
-One strong target-relevant context or market reality tied to the sales angle.
-
-Middle (1-2 sentences):
-Connect the selected value proposition to a concrete implication for the
-target. Use sender evidence only where it sharpens credibility.
-
-CTA (1 sentence):
-Ask for a low-friction next step — a short call, a reply, or a forward.
-
-WRITING STYLE:
-- Plain text. 90-130 words. 2-4 short paragraphs.
-- Commercial clarity over completeness. Sharp, not safe-and-vague.
-- Senior personas (VP, C-level, Founder): lead with business outcome
-  (cost, revenue, speed, risk). Mechanism only as a brief hook.
-- IC / Manager / Director: operational detail and mechanism are fair game.
-
-OPTIMIZE FOR:
-commercial clarity, coherent story, selected sales angle, selected value
-proposition, evidence-grounded personalization, readiness to send.
-
-OUTPUT (strict JSON):
+OUTPUT (strict JSON — claims_used is REQUIRED, minimum 1 claim):
 {
   "subject": "...",
-  "body": "..."
+  "body": "...",
+  "claims_used": [
+    {
+      "text": "<near-verbatim snippet from body>",
+      "scope": "general" | "sender" | "target",
+      "evidence_refs": ["<ref_id from CONTEXT INDEX>", ...]
+    }
+  ]
 }
 """
 
@@ -209,7 +189,7 @@ def _format_angle(
     )
 
 
-def _select_sender_evidence(
+def select_sender_evidence(
     sender_vp: ValueProposition,
     sender_observations: list[Observation],
 ) -> list[Observation]:
@@ -234,6 +214,9 @@ def _select_sender_evidence(
     remaining.sort(key=lambda o: o.confidence, reverse=True)
     extra = remaining[: max(0, _MAX_SENDER_EVIDENCE_ITEMS - len(pinned))]
     return pinned + extra
+
+
+_select_sender_evidence = select_sender_evidence
 
 
 def _format_sender_evidence(obs: list[Observation]) -> str:
@@ -276,6 +259,65 @@ def _angles_for_writer(strategy: StrategyArtifact) -> list[Angle]:
     return angles[:2]
 
 
+def coerce_email_claims(
+    raw: list[ClaimUsedDraft],
+    ref_index: dict[str, StatementContextRef],
+) -> list[EmailClaim]:
+    """Validate writer-declared claims and hydrate the cited evidence.
+
+    - Drops ref_ids not present in the CONTEXT INDEX (writer hallucination).
+    - Downgrades scope=sender/target with zero valid refs to scope=general,
+      because such a claim cannot be verified and the writer SHOULDN'T have
+      stated it as company-specific.
+    - Populates ``evidence`` with the exact ``StatementContextRef`` snippets
+      that came out of the context index. This is what the guardrail will
+      receive — no other context is needed at judgement time.
+    """
+    out: list[EmailClaim] = []
+    for c in raw:
+        text = (c.text or "").strip()
+        if not text:
+            continue
+
+        refs: list[str] = []
+        snippets: list[StatementContextRef] = []
+        seen: set[str] = set()
+        for r in c.evidence_refs or []:
+            ref_id = (r or "").strip()
+            if not ref_id or ref_id in seen:
+                continue
+            ctx = ref_index.get(ref_id)
+            if ctx is None:
+                continue
+            seen.add(ref_id)
+            refs.append(ref_id)
+            snippets.append(ctx)
+
+        scope = c.scope
+        if scope in ("sender", "target") and not refs:
+            log.warning(
+                "writer: downgraded %s claim with no valid refs to general: %s",
+                scope,
+                text[:80],
+            )
+            scope = "general"
+
+        out.append(
+            EmailClaim(
+                claim_id=f"claim_{uuid.uuid4().hex[:10]}",
+                text=text,
+                scope=scope,
+                evidence_refs=refs,
+                evidence=snippets,
+            )
+        )
+    return out
+
+
+# Old name kept so callers in email_guard.py don't have to change in lockstep.
+coerce_declared_claims = coerce_email_claims
+
+
 def _write_email_for_angle(
     *,
     angle: Angle,
@@ -286,6 +328,7 @@ def _write_email_for_angle(
     sender_evidence: list[Observation],
     strategy: StrategyArtifact,
     persona: PersonaInput,
+    context_doc: str,
     llm: LLMClient,
     usage: UsageAccumulator,
 ) -> _EmailDraft | None:
@@ -318,7 +361,9 @@ def _write_email_for_angle(
         + (strategy.messaging_angle or "")
         + "\n\nPERSONA:\n"
         + _persona_block(strategy, persona)
-        + "\nReturn the JSON for this one email now."
+        + "\n"
+        + context_doc
+        + "\n\nReturn the JSON for this one email now."
     )
     try:
         return llm.structured(
@@ -347,8 +392,8 @@ def _fallback_email_draft(
     customer = sender_vp.customer.strip() or "teams"
     label = sender_vp.label.strip() or "your work"
     company = (target_company_name or "").strip()
-    greeting_name = (persona.name or "").strip()
-    greeting = f"Hi {greeting_name}," if greeting_name else "Hi,"
+    role = (persona.role or "").strip() or "Decision Maker"
+    greeting = f"Dear {role} at {company}," if company else f"Dear {role},"
     company_phrase = f"the team at {company}" if company else "your team"
     subject = (
         f"Exploring {label} with {company}".strip()
@@ -365,9 +410,23 @@ def _fallback_email_draft(
         "but it may be worth comparing notes if this area is on the "
         "roadmap.\n\n"
         "Worth a 15-minute call next week, or should I send a 1-page "
-        "teardown first?"
+        "teardown first?\n\n"
+        "Markos Artisan"
     )
-    return _EmailDraft(subject=subject, body=body)
+    claim_text = (
+        f"The reason I thought it could be relevant is that {mechanism}."
+    )
+    return _EmailDraft(
+        subject=subject,
+        body=body,
+        claims_used=[
+            ClaimUsedDraft(
+                text=claim_text,
+                scope="sender",
+                evidence_refs=[f"vp:{sender_vp.id or 'primary'}:mechanism"],
+            )
+        ],
+    )
 
 
 def write_emails(
@@ -382,15 +441,31 @@ def write_emails(
     llm: LLMClient,
     usage: UsageAccumulator,
 ) -> list[Email]:
-    sender_evidence = _select_sender_evidence(
+    sender_evidence = select_sender_evidence(
         sender_vp, sender_observations or []
     )
-    def build(angle: Angle, d: _EmailDraft) -> Email | None:
-        if not d.should_write:
+
+    bundle = ContextBundle(
+        target_observations=target_observations,
+        sender_observations=sender_observations or [],
+        sender_evidence=sender_evidence,
+        sender_icp=sender_icp,
+        sender_vp=sender_vp,
+        strategy=strategy,
+        persona=persona,
+        target_company_name=target_company_name,
+    )
+    context_doc, ref_index = build_context_index(bundle)
+
+    def build(angle: Angle, d: _EmailDraft) -> Email:
+        if not d.should_write or not d.subject.strip() or not d.body.strip():
             log.info(
-                "write_emails: overriding model refusal for angle=%s reason=%s",
+                "write_emails: using fallback for angle=%s "
+                "(should_write=%s, has_subject=%s, has_body=%s)",
                 angle.type.value,
-                d.skip_reason[:160],
+                d.should_write,
+                bool(d.subject.strip()),
+                bool(d.body.strip()),
             )
             d = _fallback_email_draft(
                 angle=angle,
@@ -398,22 +473,20 @@ def write_emails(
                 persona=persona,
                 target_company_name=target_company_name,
             )
-        if not d.subject.strip() or not d.body.strip():
-            log.info(
-                "write_emails: using fallback for angle=%s because subject/body was empty",
+        claims = coerce_email_claims(d.claims_used, ref_index)
+        if not claims:
+            log.warning(
+                "write_emails: angle=%s produced zero claims after coercion "
+                "(raw claims_used=%d)",
                 angle.type.value,
-            )
-            d = _fallback_email_draft(
-                angle=angle,
-                sender_vp=sender_vp,
-                persona=persona,
-                target_company_name=target_company_name,
+                len(d.claims_used or []),
             )
         return Email(
             email_id=f"email_{uuid.uuid4().hex[:10]}",
             angle=angle.type,
             subject=d.subject.strip(),
             body=d.body.strip(),
+            claims=claims,
         )
 
     angles = _angles_for_writer(strategy)
@@ -428,6 +501,7 @@ def write_emails(
             sender_evidence=sender_evidence,
             strategy=strategy,
             persona=persona,
+            context_doc=context_doc,
             llm=llm,
             usage=usage,
         )
@@ -438,7 +512,5 @@ def write_emails(
                 persona=persona,
                 target_company_name=target_company_name,
             )
-        email = build(angle, draft)
-        if email:
-            out.append(email)
+        out.append(build(angle, draft))
     return out

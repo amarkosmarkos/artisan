@@ -16,7 +16,6 @@ import logging
 from langgraph.graph import END, START, StateGraph
 
 from ..schemas import (
-    ClaimMapEntry,
     ContactDecision,
     Email,
     FitAssessment,
@@ -102,7 +101,6 @@ async def run_target_graph(
     final: FlowState = await graph.ainvoke(initial_state)  # type: ignore[assignment]
     observations: list[Observation] = final.get("observations") or []
     emails: list[Email] = final.get("emails") or []
-    claim_map: list[ClaimMapEntry] = final.get("claim_map") or []
     strategy = final.get("strategy")
     persona = final.get("persona")
     tracker = final["tracker"]
@@ -145,7 +143,6 @@ async def run_target_graph(
         observations=observations,
         strategy=strategy,
         emails=emails,
-        claim_map=claim_map,
         metrics=tracker.metrics,
         selected_value_proposition=selected_vp,
         sender_value_propositions=sender_vps,

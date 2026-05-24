@@ -146,6 +146,20 @@ function deriveStageState(events: ProgressEvent[], stages: readonly { key: Stage
             : String(d.primary || "Value proposition ready"),
         );
         break;
+      case "target_discovery":
+        setSummary(
+          "target_discovery",
+          typeof d.message === "string" && d.message
+            ? d.message
+            : "Searching for target companies…",
+        );
+        break;
+      case "target_discovery_done":
+        setSummary(
+          "target_discovery",
+          `${String(d.status || "done")} · ${num(d.suggestions)} suggestion(s)`,
+        );
+        break;
       case "strategy":
         setSummary("strategy", `${num(d.observations)} observations`);
         break;
@@ -176,14 +190,22 @@ function deriveStageState(events: ProgressEvent[], stages: readonly { key: Stage
           `${num(d.emails_done)}/${num(d.emails_total)} emails`,
         );
         break;
-      case "email_guard_done":
+      case "email_guard_done": {
+        const safeEmails = num(d.safe_emails);
+        const totalEmails = num(d.total_emails);
+        const confAvg = d.confidence_avg;
+        const confSuffix =
+          typeof confAvg === "number"
+            ? ` · conf ${confAvg.toFixed(2)}`
+            : "";
         setSummary(
           "email_guard",
-          `${num(d.supported)}/${num(d.extracted)} supported · ${
-            d.unsafe ? "unsafe" : "safe"
+          `${safeEmails}/${totalEmails} safe${confSuffix} · ${
+            d.unsafe ? "some unsafe" : "all safe"
           }`,
         );
         break;
+      }
       case "angle_overlap":
         setSummary("angle_overlap", "measuring");
         break;

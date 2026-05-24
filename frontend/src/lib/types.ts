@@ -2,25 +2,6 @@
 
 export type FitLevel = "strong" | "plausible" | "weak" | "none";
 export type ContactDecision = "contact" | "wait_for_trigger" | "skip";
-export type ClaimStatus =
-  | "entailed"
-  | "neutral"
-  | "contradicted"
-  | "unsupported"
-  | "repaired";
-
-export type StatementSupportStatus =
-  | "supported"
-  | "unsupported"
-  | "contradicted"
-  | "not_checkable"
-  | "sender_context_not_verified";
-
-export type StatementCategory =
-  | "target_fact"
-  | "sender_or_value_prop"
-  | "generic_or_rhetorical"
-  | "cta";
 export type AngleType = "pain_led" | "trigger_led" | "outcome_led";
 export type PlannerDecision =
   | "continue"
@@ -116,23 +97,23 @@ export interface StatementContextRef {
   snippet: string;
 }
 
-export interface VerifiedStatement {
-  statement_id: string;
+export interface EmailClaim {
+  claim_id: string;
   text: string;
-  category: StatementCategory;
-  status: StatementSupportStatus;
-  nli_score: number | null;
-  context_refs: StatementContextRef[];
-  rationale: string;
+  scope: "general" | "sender" | "target";
+  evidence_refs: string[];
+  evidence: StatementContextRef[];
+  grounded: boolean | null;
+  confidence: number | null;
+  reason: string;
 }
 
 export interface EmailSafetyReport {
-  statements: VerifiedStatement[];
+  is_safe: boolean;
+  confidence: number;
+  verification_ok: boolean;
   email_regenerated: boolean;
   regeneration_count: number;
-  final_email_safe: boolean;
-  verification_ok: boolean;
-  failed_statements: string[];
 }
 
 export interface Email {
@@ -140,18 +121,17 @@ export interface Email {
   angle: AngleType;
   subject: string;
   body: string;
+  claims: EmailClaim[];
   safety?: EmailSafetyReport | null;
 }
 
-export interface ClaimMapEntry {
-  claim_id: string;
-  email_id: string;
-  angle: AngleType;
-  text: string;
-  category: StatementCategory;
-  status: StatementSupportStatus;
-  nli_score: number | null;
-  citations: { url: string; snippet: string }[];
+export interface LlmUsageByPurpose {
+  purpose: string;
+  label: string;
+  calls: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
 }
 
 export interface RunMetrics {
@@ -159,6 +139,8 @@ export interface RunMetrics {
   tokens_in: number;
   tokens_out: number;
   cost_usd: number;
+  llm_calls: number;
+  llm_usage_by_purpose: LlmUsageByPurpose[];
   pages_fetched: number;
   sections_created: number;
   observations_extracted: number;
@@ -167,24 +149,17 @@ export interface RunMetrics {
   compression_ratio: number;
   raw_cleaned_chars: number;
   evidence_chars_used: number;
-  extracted_statements_count: number;
-  supported_statements_count: number;
-  unsupported_statements_count: number;
-  contradicted_statements_count: number;
-  not_checkable_statements_count: number;
-  evidence_support_rate: number | null;
+  declared_claims_count: number;
+  email_claims_count: number;
+  unsupported_claims_count: number;
+  safety_confidence_avg: number | null;
   email_regenerated: boolean;
   regeneration_count: number;
+  emails_safe_count: number;
+  emails_total: number;
   final_email_safe: boolean;
   verification_ok: boolean;
-  failed_statements: string[];
-  claims_total: number;
-  claims_supported: number;
-  claims_unsupported: number;
-  claims_contradicted: number;
   angle_overlap: number | null;
-  claim_support_rate: number | null;
-  unsupported_claim_rate: number | null;
   observation_validation_rate: number | null;
   planner_decisions: Array<{
     task: string;
@@ -205,6 +180,7 @@ export interface SenderResponse {
   value_propositions?: ValueProposition[];
   observations: Observation[];
   metrics: RunMetrics;
+  suggested_targets?: SuggestedTargetsResponse | null;
 }
 
 export interface PersonaInput {
@@ -221,7 +197,6 @@ export interface TargetResponse {
   observations: Observation[];
   strategy: StrategyArtifact;
   emails: Email[];
-  claim_map: ClaimMapEntry[];
   metrics: RunMetrics;
   selected_value_proposition?: ValueProposition | null;
   sender_value_propositions?: ValueProposition[];
@@ -244,7 +219,7 @@ export interface DiscoveryEvidence {
 
 export interface SuggestedPersona {
   title: string;
-  seniority: Seniority | null;
+  seniority: Seniority;
   name: string | null;
   rationale: string;
 }

@@ -175,20 +175,6 @@ def _target_persona_runs(target_company_id: str) -> list[dict]:
             json.loads(r["payload"])
         )
 
-    claim_rows = fetchall(
-        "SELECT cm.claim_id, cm.email_id, cm.angle, cm.text, cm.status, "
-        "       cm.nli_score, cm.citations, e.persona_id "
-        "FROM claim_map cm "
-        "JOIN emails e ON e.email_id = cm.email_id "
-        "WHERE e.target_company_id = ?",
-        (target_company_id,),
-    )
-    claims_by_pid: dict[str, list[dict]] = {}
-    for r in claim_rows:
-        d = dict(r)
-        d["citations"] = json.loads(d["citations"] or "[]")
-        claims_by_pid.setdefault(d.pop("persona_id"), []).append(d)
-
     def _build_strategy_block(s_row: Any) -> dict:
         strategy_payload = json.loads(s_row["payload"])
         selected_vp, sender_vps = _resolve_selected_vp(
@@ -217,7 +203,6 @@ def _target_persona_runs(target_company_id: str) -> list[dict]:
                 "created_at": p["created_at"],
                 "strategy": _build_strategy_block(s) if s else None,
                 "emails": emails_by_pid.get(pid, []),
-                "claim_map": claims_by_pid.get(pid, []),
             }
         )
 
@@ -236,7 +221,6 @@ def _target_persona_runs(target_company_id: str) -> list[dict]:
                 "created_at": None,
                 "strategy": _build_strategy_block(s),
                 "emails": emails_by_pid.get(pid, []),
-                "claim_map": claims_by_pid.get(pid, []),
             }
         )
     return out
@@ -435,26 +419,8 @@ def delete_email(email_id: str) -> dict:
     if not row:
         raise HTTPException(status_code=404, detail="email not found")
     with tx() as conn:
-        conn.execute("DELETE FROM claim_map WHERE email_id = ?", (email_id,))
         conn.execute("DELETE FROM emails WHERE email_id = ?", (email_id,))
     return {"deleted": email_id}
-
-
-@router.get("/targets/{target_company_id}/claim-map")
-def target_claim_map(target_company_id: str) -> dict:
-    rows = fetchall(
-        "SELECT cm.claim_id, cm.email_id, cm.angle, cm.text, cm.status, cm.nli_score, cm.citations "
-        "FROM claim_map cm "
-        "JOIN emails e ON e.email_id = cm.email_id "
-        "WHERE e.target_company_id = ?",
-        (target_company_id,),
-    )
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["citations"] = json.loads(d["citations"] or "[]")
-        out.append(d)
-    return {"claims": out}
 
 
 # ---------- Evidence resolver ----------

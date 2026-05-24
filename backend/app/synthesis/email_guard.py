@@ -1,192 +1,113 @@
-"""Email safety guard (single-pass LLM judge).
+"""Email safety guardrail (cheap, focused, traceable).
 
-The writer produces subject + body only. This module runs ONE LLM call per
-email that simultaneously:
+The writer outputs the email body + a list of ``EmailClaim`` objects.
+Each claim already carries:
 
-  1. extracts the most important factual / checkable statements,
-  2. classifies each statement into one of four categories
-     (``target_fact``, ``sender_or_value_prop``, ``generic_or_rhetorical``,
-     ``cta``),
-  3. judges each statement against the same briefing the writer received.
+  - ``text``: a near-verbatim snippet from the body;
+  - ``scope``: ``general`` (no evidence needed) / ``sender`` / ``target``;
+  - ``evidence_refs``: ref_ids from the CONTEXT INDEX the writer cited;
+  - ``evidence``: the hydrated snippets for those refs.
 
-Safety contract (deliberately narrow):
+The guardrail makes ONE LLM call per email. It receives nothing but the
+email body and the writer's declared claims with their cited evidence.
+For each claim it returns ``grounded: bool`` + ``confidence: float`` +
+``reason``. The email is safe iff every sender/target claim is grounded.
 
-  - Only ``target_fact`` statements can mark an email unsafe.
-  - ``sender_or_value_prop`` claims are checked softly against sender
-    context; missing sender refs yields ``sender_context_not_verified`` —
-    never a failure.
-  - ``generic_or_rhetorical`` and ``cta`` are ``not_checkable`` and never
-    cause failures.
-
-Regeneration only fires when at least one ``target_fact`` is unsupported
-or contradicted, capped at one pass.
+There is no independent claim extraction here. There is no re-reading of
+the full briefing. The guardrail's only job is: does the writer's cited
+evidence actually support the claim it cites?
 """
 from __future__ import annotations
 
 import logging
-import uuid
-from dataclasses import dataclass, field
+from statistics import mean
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from ..db import fetchall
-from ..pipeline import validate as obs_validate
 from ..schemas import (
-    Angle,
-    ClaimMapEntry,
     Email,
+    EmailClaim,
     EmailSafetyReport,
-    ICP,
     Observation,
-    PersonaInput,
-    StatementCategory,
     StatementContextRef,
-    StatementSupportStatus,
-    StrategyArtifact,
-    ValueProposition,
-    VerifiedStatement,
 )
 from ..services.llm import LLMClient, UsageAccumulator
+from .context_index import ContextBundle
 from . import writer as writer_mod
 
 log = logging.getLogger(__name__)
 
-# Hard limits keep one judge call cheap and snappy.
+
 MAX_REGENERATIONS = 1
-_MAX_STATEMENTS = 6
-_MAX_CONTEXT_CHARS = 18000
-
-_VALID_STATUSES = {s.value for s in StatementSupportStatus}
-_VALID_CATEGORIES = {c.value for c in StatementCategory}
 
 
-@dataclass
-class GuardContext:
-    """The slice of workflow context the writer actually consumed."""
-
-    target_observations: list[Observation] = field(default_factory=list)
-    sender_observations: list[Observation] = field(default_factory=list)
-    sender_evidence: list[Observation] = field(default_factory=list)
-    sender_icp: ICP | None = None
-    sender_vp: ValueProposition | None = None
-    strategy: StrategyArtifact | None = None
-    persona: PersonaInput | None = None
-    target_company_name: str = ""
+# Backwards-compatible alias.
+GuardContext = ContextBundle
 
 
-# ---------- LLM schema ----------
+# ---------- LLM judge schema ----------
 
 
-class _JudgedStatement(BaseModel):
-    text: str = Field(min_length=4, max_length=500)
-    category: str
-    status: str
-    rationale: str = ""
-    context_refs: list[str] = Field(default_factory=list)
+class _ClaimVerdict(BaseModel):
+    claim_id: str
+    grounded: bool
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    reason: str = Field(default="", max_length=300)
 
 
 class _JudgeResult(BaseModel):
-    statements: list[_JudgedStatement] = Field(
-        default_factory=list, max_length=_MAX_STATEMENTS
-    )
+    claims: list[_ClaimVerdict] = Field(default_factory=list)
 
 
-class _RegeneratedEmail(BaseModel):
-    subject: str = Field(max_length=180)
-    body: str = Field(max_length=2200)
-
-
-# ---------- System prompts ----------
-
-
-_SYSTEM_JUDGE = f"""You are a fact-checking judge for B2B outbound sales emails.
+_SYSTEM_JUDGE = """You are a strict fact-checking guardrail for B2B sales emails.
 
 You will be given:
-- WRITER BRIEFING: the exact briefing the writer received (target company,
-  recipient name, sender value proposition, sender evidence, ICP, strategy
-  angle with grounding observations, additional target observations,
-  persona).
-- EMAIL UNDER REVIEW: subject + body.
-- CONTEXT INDEX: numbered [ref_id] entries with snippets. This is the
-  complete set of premises you may cite.
+- EMAIL BODY (subject + body).
+- A list of CLAIMS the writer says it used in the email. Each claim has:
+    * claim_id
+    * text (a snippet from the email body)
+    * scope: "general" / "sender" / "target"
+    * evidence: 0+ retrieval snippets the writer cited for that claim.
 
 YOUR JOB:
-Pick at most {_MAX_STATEMENTS} factual / checkable statements from the
-email body. For each, return its CATEGORY, STATUS, a short RATIONALE, and
-optional CONTEXT_REFS.
+For each claim return one verdict object with the SAME claim_id:
+  - grounded (bool):
+      * scope=general — return grounded=true unless the claim text is in
+        fact a specific sender/target assertion in disguise (then false).
+      * scope=sender or scope=target — return grounded=true ONLY when the
+        provided ``evidence`` snippets materially support the claim
+        (paraphrase / direct support / clear implication). Return
+        grounded=false when the evidence is empty, off-topic, or
+        contradicts the claim.
+  - confidence (0.0–1.0): how confident you are in the verdict.
+  - reason: ONE short sentence explaining the verdict. Mandatory when
+    grounded=false; optional when true.
 
-CATEGORIES:
-- target_fact: an assertion about the recipient (target) company — its
-  facts, events, capabilities, hires, customers, tech stack, intent, or
-  inferred pain. Example: "Anthropic focuses on scalable oversight."
-- sender_or_value_prop: an assertion about the SENDER, its product, its
-  customers, its mechanism, or its outcomes. Example: "At Multiverse
-  Computing, we specialize in AI model compression."
-- generic_or_rhetorical: vague commercial language with no concrete fact
-  ("this could improve operational efficiency", "every exception matters",
-  "outcomes that matter at scale").
-- cta: greeting, sign-off, meeting-ask, or "let me know if…" phrasing.
-
-PICK CRITERIA — prefer in this order, return at most {_MAX_STATEMENTS}:
-1. target_fact statements (always include them all if there are any).
-2. sender_or_value_prop statements with a specific, concrete claim.
-3. generic_or_rhetorical and cta statements ONLY if you have room left.
-   Skip them if you already have {_MAX_STATEMENTS} more important entries.
-
-STATUS VALUES:
-- "supported": at least one CONTEXT INDEX entry materially supports the
-  statement. Paraphrases, near-paraphrases, and reasonable summarizations
-  COUNT AS SUPPORTED.
-- "contradicted": at least one CONTEXT INDEX entry materially disputes
-  the statement. Always wins over supported.
-- "unsupported": the statement asserts a checkable fact that NO CONTEXT
-  INDEX entry materially supports or contradicts.
-- "sender_context_not_verified": ONLY for sender_or_value_prop statements
-  when no CONTEXT INDEX entry materially supports them. Use this INSTEAD
-  of "unsupported" for sender claims. Treat it as informational, not as
-  a failure.
-- "not_checkable": for generic_or_rhetorical and cta. Always.
-
-HARD RULES:
-- target_fact statements MUST be one of: supported, unsupported,
-  contradicted. Never "sender_context_not_verified".
-- sender_or_value_prop statements MUST be one of: supported, contradicted,
-  sender_context_not_verified. Never "unsupported".
-- generic_or_rhetorical and cta MUST be "not_checkable".
-- "supported" and "contradicted" require at least one valid CONTEXT INDEX
-  ref_id in context_refs. Every other status must have empty context_refs.
-- Only cite ref_ids that appear in CONTEXT INDEX. Never invent ref_ids.
-- Each `text` must be a verbatim or near-verbatim quote of the email body.
+Do not invent new claims. Do not re-read or guess at outside knowledge.
+The cited evidence is the only premise you have.
 
 OUTPUT (strict JSON):
-{{
-  "statements": [
-    {{
-      "text": "...",
-      "category": "target_fact|sender_or_value_prop|generic_or_rhetorical|cta",
-      "status": "supported|unsupported|contradicted|sender_context_not_verified|not_checkable",
-      "rationale": "one short sentence",
-      "context_refs": ["vp:xxx:outcome"]
-    }}
+{
+  "claims": [
+    { "claim_id": "...", "grounded": true | false, "confidence": 0.0, "reason": "..." }
   ]
-}}
+}
 """
 
 
-_SYSTEM_REGENERATE = """You rewrite a B2B outbound sales email so it stays natural and preserves intent,
-but removes or softens every unsupported or contradicted TARGET-SPECIFIC factual
-statement.
+_REGEN_SYSTEM = """You rewrite a B2B outbound sales email so every factual claim is either
+backed by the provided CONTEXT INDEX or softened to a general,
+non-company-specific statement.
 
 Rules:
-- Output only subject and body (plain text body).
-- Do NOT patch individual sentences in isolation; produce one coherent email.
-- Only include target-specific facts that appear in the provided context.
-- Sender value proposition framing is allowed when not contradicting context.
-- Do not invent new target facts, pain, intent, or urgency.
-- If target-specific context is thin, write a conservative exploratory note.
-- Keep similar length and tone to the original.
-
-Return JSON: { "subject": "...", "body": "..." }
+- Output subject, body, AND claims_used (same schema as the writer).
+- Open with "Dear <role> of/at <company>," — never "Hi there,".
+- Close with: Markos Artisan (no "Best regards").
+- claims_used MUST contain at least one claim, with the same scope rules
+  as the writer (general / sender / target). Cite only ref_ids that exist
+  in CONTEXT INDEX.
 """
 
 
@@ -220,316 +141,57 @@ def load_observations_for_company(company_id: str) -> list[Observation]:
     return out
 
 
-# ---------- Context index ----------
-
-
-def _icp_field_lines(icp: ICP) -> list[tuple[str, str]]:
-    rows: list[tuple[str, str]] = []
-    for key, fld in (
-        ("icp:industries", icp.target_industries),
-        ("icp:sizes", icp.size_bands),
-        ("icp:buyers", icp.likely_buyers),
-        ("icp:triggers", icp.common_triggers),
-        ("icp:negative", icp.negative_icp),
-    ):
-        if fld.values:
-            rows.append((key, "; ".join(fld.values)))
-    return rows
-
-
-def _safe_target_observations(ctx: GuardContext) -> list[Observation]:
-    try:
-        return obs_validate.filter_for_synthesis(ctx.target_observations)
-    except Exception:  # noqa: BLE001
-        return list(ctx.target_observations)
-
-
-def build_context_index(ctx: GuardContext) -> tuple[str, dict[str, StatementContextRef]]:
-    """Build a numbered context document and ref lookup for verification.
-
-    Only sources the writer actually consumed go in (VP, strategy, sender
-    evidence subset, ICP, filtered target observations, persona, identity).
-    No sections. No full sender-obs bag.
-    """
-    refs: dict[str, StatementContextRef] = {}
-    lines: list[str] = ["CONTEXT INDEX:"]
-    total_chars = len(lines[0])
-
-    def add(ref_id: str, ref_type: str, label: str, snippet: str) -> None:
-        nonlocal total_chars
-        snippet = snippet.strip()
-        if not snippet:
-            return
-        snippet = snippet[:400]
-        line = f"[{ref_id}] ({ref_type}) {label}: {snippet}"
-        if total_chars + len(line) + 1 > _MAX_CONTEXT_CHARS:
-            return
-        refs[ref_id] = StatementContextRef(
-            ref_id=ref_id,
-            ref_type=ref_type,
-            label=label,
-            snippet=snippet,
-        )
-        lines.append(line)
-        total_chars += len(line) + 1
-
-    if ctx.sender_vp:
-        vp = ctx.sender_vp
-        vp_key = vp.id or "primary"
-        for ref_id, label, val in (
-            (f"vp:{vp_key}:label", "VP label", vp.label),
-            (f"vp:{vp_key}:customer", "VP customer", vp.customer),
-            (f"vp:{vp_key}:pain", "VP pain", vp.pain),
-            (f"vp:{vp_key}:outcome", "VP outcome", vp.outcome),
-            (f"vp:{vp_key}:mechanism", "VP mechanism", vp.mechanism),
-        ):
-            add(ref_id, "value_prop", label, val)
-
-    if ctx.strategy:
-        fa = ctx.strategy.fit_assessment
-        add("strategy:fit", "strategy", "fit level", fa.level.value)
-        if fa.reasons:
-            add("strategy:fit_reasons", "strategy", "fit reasons", "; ".join(fa.reasons))
-        if ctx.strategy.messaging_angle:
-            add(
-                "strategy:messaging_angle",
-                "strategy",
-                "messaging angle",
-                ctx.strategy.messaging_angle,
-            )
-        if ctx.strategy.selection_reason:
-            add(
-                "strategy:selection_reason",
-                "strategy",
-                "VP selection",
-                ctx.strategy.selection_reason,
-            )
-        for angle in ctx.strategy.strategy.angles:
-            add(
-                f"strategy:angle:{angle.type.value}",
-                "strategy",
-                f"angle {angle.type.value}",
-                angle.hypothesis,
-            )
-
-    for obs in ctx.sender_evidence:
-        add(
-            f"sender:{obs.observation_id}",
-            "observation",
-            f"sender {obs.kind}",
-            obs.text,
-        )
-
-    if ctx.sender_icp:
-        for ref_id, text in _icp_field_lines(ctx.sender_icp):
-            add(ref_id, "icp", ref_id.replace("icp:", ""), text)
-
-    for obs in _safe_target_observations(ctx):
-        add(
-            obs.observation_id,
-            "observation",
-            f"target {obs.kind}",
-            obs.text,
-        )
-
-    if ctx.persona:
-        add("persona:role", "persona", "role", ctx.persona.role)
-        add("persona:seniority", "persona", "seniority", ctx.persona.seniority.value)
-    if ctx.target_company_name:
-        add("target:name", "target", "target company name", ctx.target_company_name)
-
-    return "\n".join(lines), refs
-
-
-# ---------- Briefing renderer (same view as writer) ----------
-
-
-def _angle_for_email(
-    email: Email, strategy: StrategyArtifact | None
-) -> Angle | None:
-    if not strategy:
-        return None
-    for angle in strategy.strategy.angles:
-        if angle.type == email.angle:
-            return angle
-    return None
-
-
-def _format_writer_briefing(email: Email, *, ctx: GuardContext) -> str:
-    company = (ctx.target_company_name or "").strip() or "(unknown)"
-    recipient = (
-        (ctx.persona.name or "").strip()
-        if ctx.persona and ctx.persona.name
-        else ""
-    ) or "(none)"
-    vp = ctx.sender_vp or ValueProposition()
-    icp = ctx.sender_icp or ICP()
-    angle = _angle_for_email(email, ctx.strategy)
-    angle_block = ""
-    if angle:
-        obs_by_id = {o.observation_id: o for o in _safe_target_observations(ctx)}
-        grounding = "\n".join(
-            f"    - {ref} [{obs_by_id[ref].kind}]: {obs_by_id[ref].text}"
-            for ref in angle.evidence_refs
-            if ref in obs_by_id
-        ) or "    (none)"
-        angle_block = (
-            "STRATEGY ANGLE FOR THIS EMAIL:\n"
-            f"- type: {angle.type.value}\n"
-            f"- hypothesis: {angle.hypothesis}\n"
-            f"- angle_grounding_observations:\n{grounding}\n"
-        )
-
-    persona_block = ""
-    if ctx.persona:
-        persona_block = (
-            "PERSONA:\n"
-            f"- name: {recipient}\n"
-            f"- role: {ctx.persona.role}\n"
-            f"- seniority: {ctx.persona.seniority.value}\n"
-        )
-
-    sender_ev_lines = "\n".join(
-        f"- {o.observation_id} [{o.kind}, conf={o.confidence:.2f}]: {o.text}"
-        for o in ctx.sender_evidence
-    ) or "(no sender evidence available)"
-
-    target_obs_lines = "\n".join(
-        f"- {o.observation_id} [{o.kind}, conf={o.confidence:.2f}]: {o.text}"
-        for o in _safe_target_observations(ctx)
-    ) or "(none)"
-
-    icp_line = (
-        f"industries={icp.target_industries.values}; "
-        f"sizes={icp.size_bands.values}; "
-        f"buyers={icp.likely_buyers.values}; "
-        f"triggers={icp.common_triggers.values}"
-    )
-
-    return (
-        f"TARGET COMPANY NAME: {company}\n"
-        f"RECIPIENT NAME: {recipient}\n\n"
-        "SENDER VALUE PROPOSITION:\n"
-        f"- label:     {vp.label}\n"
-        f"- customer:  {vp.customer}\n"
-        f"- pain:      {vp.pain}\n"
-        f"- outcome:   {vp.outcome}\n"
-        f"- mechanism: {vp.mechanism}\n\n"
-        f"SENDER EVIDENCE:\n{sender_ev_lines}\n\n"
-        f"SENDER ICP: {icp_line}\n\n"
-        f"{angle_block}\n"
-        f"ADDITIONAL TARGET OBSERVATIONS:\n{target_obs_lines}\n\n"
-        f"{persona_block}"
-    )
-
-
 # ---------- Judge ----------
 
 
-def _coerce_category(raw: str) -> StatementCategory:
-    norm = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if norm in _VALID_CATEGORIES:
-        return StatementCategory(norm)
-    return StatementCategory.GENERIC_OR_RHETORICAL
-
-
-def _coerce_status(raw: str) -> StatementSupportStatus | None:
-    norm = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if norm in _VALID_STATUSES:
-        return StatementSupportStatus(norm)
-    return None
-
-
-def _coerce_refs(
-    refs: list[str], ref_index: dict[str, StatementContextRef]
-) -> list[StatementContextRef]:
-    seen: set[str] = set()
-    out: list[StatementContextRef] = []
-    for r in refs or []:
-        if not isinstance(r, str):
-            continue
-        ref_id = r.strip()
-        if not ref_id or ref_id in seen:
-            continue
-        ref = ref_index.get(ref_id)
-        if ref is None:
-            continue
-        seen.add(ref_id)
-        out.append(ref)
-    return out
-
-
-def _reconcile(
-    *,
-    category: StatementCategory,
-    status: StatementSupportStatus | None,
-    refs: list[StatementContextRef],
-) -> tuple[StatementSupportStatus, list[StatementContextRef], str | None]:
-    """Apply the safety contract to a judge row.
-
-    Returns the cleaned ``(status, refs, override_rationale)``. The
-    override rationale is set when we had to correct the judge's output.
-    """
-    if category == StatementCategory.CTA:
-        return StatementSupportStatus.NOT_CHECKABLE, [], None
-    if category == StatementCategory.GENERIC_OR_RHETORICAL:
-        return StatementSupportStatus.NOT_CHECKABLE, [], None
-
-    if category == StatementCategory.SENDER_OR_VALUE_PROP:
-        # Sender claims may only be supported, contradicted, or
-        # explicitly "sender_context_not_verified".
-        if status == StatementSupportStatus.SUPPORTED and refs:
-            return StatementSupportStatus.SUPPORTED, refs, None
-        if status == StatementSupportStatus.CONTRADICTED and refs:
-            return StatementSupportStatus.CONTRADICTED, refs, None
-        # No valid evidence: it's sender positioning, that's fine.
-        return (
-            StatementSupportStatus.SENDER_CONTEXT_NOT_VERIFIED,
-            [],
-            "Sender / value-prop positioning; no sender context found to verify against.",
+def _format_evidence_for_judge(evidence: list[StatementContextRef]) -> str:
+    if not evidence:
+        return "    (no evidence cited)"
+    lines: list[str] = []
+    for ref in evidence:
+        lines.append(
+            f"    - [{ref.ref_id}] ({ref.ref_type}) {ref.label}: {ref.snippet}"
         )
+    return "\n".join(lines)
 
-    # category == TARGET_FACT
-    if status == StatementSupportStatus.SUPPORTED and refs:
-        return StatementSupportStatus.SUPPORTED, refs, None
-    if status == StatementSupportStatus.CONTRADICTED and refs:
-        return StatementSupportStatus.CONTRADICTED, refs, None
-    # Anything else for a target_fact (including "sender_context_not_verified",
-    # which is invalid here) → unsupported.
-    if status == StatementSupportStatus.SUPPORTED and not refs:
-        return (
-            StatementSupportStatus.UNSUPPORTED,
-            [],
-            "Judge marked supported but cited no valid CONTEXT INDEX ref.",
+
+def _format_claims_for_judge(claims: list[EmailClaim]) -> str:
+    if not claims:
+        return "(no claims declared)"
+    parts: list[str] = []
+    for c in claims:
+        parts.append(
+            f"- claim_id: {c.claim_id}\n"
+            f"  scope: {c.scope}\n"
+            f"  text: {c.text}\n"
+            f"  evidence:\n"
+            f"{_format_evidence_for_judge(c.evidence)}"
         )
-    return StatementSupportStatus.UNSUPPORTED, [], None
+    return "\n".join(parts)
 
 
 def _judge_email(
     email: Email,
     *,
-    ctx: GuardContext,
     llm: LLMClient,
     usage: UsageAccumulator,
-) -> tuple[list[VerifiedStatement], bool]:
-    """Single LLM call: extract + classify + judge.
+) -> _JudgeResult | None:
+    if not email.claims:
+        log.warning(
+            "email_guard: email=%s has no declared claims; nothing to verify",
+            email.email_id,
+        )
+        return _JudgeResult(claims=[])
 
-    Returns ``(statements, verification_ok)``. ``verification_ok`` is
-    False only when the judge call itself failed.
-    """
-    context_doc, ref_index = build_context_index(ctx)
-    briefing = _format_writer_briefing(email, ctx=ctx)
     user = (
-        f"WRITER BRIEFING:\n{briefing}\n\n"
-        "EMAIL UNDER REVIEW:\n"
-        f"Subject: {email.subject}\n"
-        f"Body:\n{email.body}\n\n"
-        f"{context_doc}\n\n"
-        f"Pick at most {_MAX_STATEMENTS} factual / checkable statements "
-        "and judge each."
+        f"EMAIL SUBJECT: {email.subject}\n"
+        f"EMAIL BODY:\n{email.body}\n\n"
+        "CLAIMS TO VERIFY:\n"
+        + _format_claims_for_judge(email.claims)
+        + "\n\nReturn one verdict per claim_id."
     )
     try:
-        result = llm.structured(
+        return llm.structured(
             system=_SYSTEM_JUDGE,
             user=user,
             schema=_JudgeResult,
@@ -538,146 +200,174 @@ def _judge_email(
             temperature=0.0,
         )
     except Exception as e:  # noqa: BLE001
-        log.exception("email_guard judge failed email=%s: %s", email.email_id, e)
-        return [], False
-
-    verified: list[VerifiedStatement] = []
-    for row in result.statements[:_MAX_STATEMENTS]:
-        text = row.text.strip()
-        if not text:
-            continue
-        category = _coerce_category(row.category)
-        raw_status = _coerce_status(row.status)
-        refs = _coerce_refs(row.context_refs, ref_index)
-        status, refs, override = _reconcile(
-            category=category, status=raw_status, refs=refs
+        log.exception(
+            "email_guard judge failed email=%s: %s", email.email_id, e
         )
-        rationale = override or (row.rationale or "").strip() or "(no rationale)"
-        verified.append(
-            VerifiedStatement(
-                statement_id=f"stmt_{uuid.uuid4().hex[:10]}",
-                text=text,
-                category=category,
-                status=status,
-                context_refs=refs,
-                rationale=rationale,
+        return None
+
+
+def _apply_verdicts(
+    claims: list[EmailClaim], result: _JudgeResult
+) -> list[EmailClaim]:
+    """Merge per-claim verdicts back onto the original claim list."""
+    by_id = {v.claim_id: v for v in result.claims}
+    out: list[EmailClaim] = []
+    for c in claims:
+        v = by_id.get(c.claim_id)
+        if v is None:
+            # The judge silently dropped this claim — treat as not grounded
+            # for sender/target, accepted-by-default for general.
+            grounded = c.scope == "general"
+            out.append(
+                c.model_copy(
+                    update={
+                        "grounded": grounded,
+                        "confidence": 0.0,
+                        "reason": "" if grounded else "judge skipped this claim",
+                    }
+                )
+            )
+            continue
+
+        grounded = bool(v.grounded)
+        # Hard rule: a sender/target claim with zero evidence cannot be
+        # grounded, even if the LLM said so. Trust the deterministic check
+        # over the judge's optimism.
+        if c.scope in ("sender", "target") and not c.evidence:
+            grounded = False
+
+        out.append(
+            c.model_copy(
+                update={
+                    "grounded": grounded,
+                    "confidence": float(v.confidence),
+                    "reason": v.reason.strip(),
+                }
             )
         )
-
-    return verified, True
-
-
-# ---------- Reporting ----------
+    return out
 
 
-def _failed_target_facts(statements: list[VerifiedStatement]) -> list[str]:
-    """The ONLY thing that can mark an email unsafe."""
-    return [
-        s.text
-        for s in statements
-        if s.category == StatementCategory.TARGET_FACT
-        and s.status
-        in (
-            StatementSupportStatus.UNSUPPORTED,
-            StatementSupportStatus.CONTRADICTED,
-        )
-    ]
+def _aggregate_verdict(claims: list[EmailClaim]) -> tuple[bool, float]:
+    """Return (is_safe, email_confidence) from per-claim verdicts."""
+    is_safe = True
+    confs: list[float] = []
+    for c in claims:
+        if c.confidence is not None:
+            confs.append(float(c.confidence))
+        if c.scope in ("sender", "target") and c.grounded is False:
+            is_safe = False
+    avg = round(mean(confs), 3) if confs else 0.0
+    return is_safe, avg
 
 
-def _build_safety_report(
-    statements: list[VerifiedStatement],
-    *,
-    email_regenerated: bool,
-    regeneration_count: int,
-    verification_ok: bool,
-) -> EmailSafetyReport:
-    failed = _failed_target_facts(statements)
-    final_email_safe = verification_ok and not failed
-    return EmailSafetyReport(
-        statements=statements,
-        email_regenerated=email_regenerated,
-        regeneration_count=regeneration_count,
-        final_email_safe=final_email_safe,
-        failed_statements=failed,
-        verification_ok=verification_ok,
-    )
-
-
-def verify_email_body(
+def verify_email(
     email: Email,
     *,
-    ctx: GuardContext,
     llm: LLMClient,
     usage: UsageAccumulator,
-) -> EmailSafetyReport:
-    statements, verification_ok = _judge_email(
-        email, ctx=ctx, llm=llm, usage=usage
+) -> Email:
+    """Judge one email. Returns the email with per-claim verdicts attached."""
+    if not email.claims:
+        report = EmailSafetyReport(
+            is_safe=False,
+            confidence=0.0,
+            verification_ok=True,
+        )
+        log.warning(
+            "email_guard: email=%s judged unsafe (no declared claims)",
+            email.email_id,
+        )
+        return email.model_copy(update={"safety": report})
+
+    result = _judge_email(email, llm=llm, usage=usage)
+    if result is None:
+        report = EmailSafetyReport(
+            is_safe=False,
+            confidence=0.0,
+            verification_ok=False,
+        )
+        return email.model_copy(update={"safety": report})
+
+    judged_claims = _apply_verdicts(email.claims, result)
+    is_safe, conf = _aggregate_verdict(judged_claims)
+    report = EmailSafetyReport(
+        is_safe=is_safe,
+        confidence=conf,
+        verification_ok=True,
     )
-    return _build_safety_report(
-        statements,
-        email_regenerated=False,
-        regeneration_count=0,
-        verification_ok=verification_ok,
+    return email.model_copy(
+        update={"claims": judged_claims, "safety": report}
     )
 
 
-# ---------- Regeneration (target_fact failures only) ----------
+# ---------- Regeneration (single pass on unsafe) ----------
+
+
+class _RegeneratedEmail(BaseModel):
+    subject: str = Field(max_length=180)
+    body: str = Field(max_length=2200)
+    claims_used: list[writer_mod.ClaimUsedDraft] = Field(min_length=1, max_length=8)
 
 
 def regenerate_email(
     email: Email,
     *,
-    failed: list[str],
     ctx: GuardContext,
     llm: LLMClient,
     usage: UsageAccumulator,
 ) -> Email:
-    context_doc, _ = build_context_index(ctx)
-    failed_block = "\n".join(f"- {t}" for t in failed) or "(none)"
-    briefing = _format_writer_briefing(email, ctx=ctx)
+    """Rewrite an unsafe email once, then re-coerce its claims."""
+    from .context_index import build_context_index
+
+    context_doc, ref_index = build_context_index(ctx)
+    failing = [
+        c
+        for c in email.claims
+        if c.scope in ("sender", "target") and c.grounded is False
+    ]
+    failure_lines = "\n".join(
+        f"  - [{c.claim_id}] ({c.scope}) {c.text}"
+        + (f" — reason: {c.reason}" if c.reason else "")
+        for c in failing
+    ) or "  (none specified — soften any unverifiable claim)"
     user = (
-        f"WRITER BRIEFING:\n{briefing}\n\n"
         f"ORIGINAL SUBJECT: {email.subject}\n\n"
         f"ORIGINAL BODY:\n{email.body}\n\n"
-        f"TARGET-SPECIFIC STATEMENTS THAT FAILED VERIFICATION "
-        f"(must not reappear as facts):\n{failed_block}\n\n"
+        f"CLAIMS THAT FAILED VERIFICATION:\n{failure_lines}\n\n"
         f"{context_doc}\n\n"
-        "Rewrite the full email now."
+        "Rewrite the full email and declare claims_used. Every sender/target "
+        "claim MUST cite ref_ids that exist in CONTEXT INDEX."
     )
     try:
         draft = llm.structured(
-            system=_SYSTEM_REGENERATE,
+            system=_REGEN_SYSTEM,
             user=user,
             schema=_RegeneratedEmail,
             purpose="email_guard_regenerate",
             usage=usage,
             temperature=0.2,
         )
-        return email.model_copy(
-            update={
-                "subject": draft.subject.strip() or email.subject,
-                "body": draft.body.strip() or email.body,
-            }
-        )
     except Exception as e:  # noqa: BLE001
-        log.warning("email_guard regenerate failed email=%s: %s", email.email_id, e)
+        log.warning(
+            "email_guard regenerate failed email=%s: %s", email.email_id, e
+        )
         return email
 
-
-def _attach_report(
-    email: Email,
-    report: EmailSafetyReport,
-    *,
-    regenerated: bool,
-    regen_count: int,
-) -> Email:
-    updated = report.model_copy(
+    new_claims = writer_mod.coerce_email_claims(draft.claims_used, ref_index)
+    if not new_claims:
+        log.warning(
+            "email_guard regenerate email=%s returned no valid claims; keeping original",
+            email.email_id,
+        )
+        new_claims = list(email.claims)
+    return email.model_copy(
         update={
-            "email_regenerated": regenerated,
-            "regeneration_count": regen_count,
+            "subject": draft.subject.strip() or email.subject,
+            "body": draft.body.strip() or email.body,
+            "claims": new_claims,
         }
     )
-    return email.model_copy(update={"safety": updated})
 
 
 def guard_email(
@@ -687,138 +377,87 @@ def guard_email(
     llm: LLMClient,
     usage: UsageAccumulator,
 ) -> Email:
-    """Judge once. Regenerate at most once and ONLY if a target_fact failed."""
-    regen_count = 0
-    regenerated = False
-    current = email
+    """Judge once. If unsafe, regenerate once and judge again. Then accept."""
+    judged = verify_email(email, llm=llm, usage=usage)
+    safety = judged.safety
+    if safety and safety.is_safe:
+        return judged
+    if safety and not safety.verification_ok:
+        # Verifier unavailable; do not regenerate (we can't tell if it would help).
+        return judged
 
-    for attempt in range(MAX_REGENERATIONS + 1):
-        report = verify_email_body(current, ctx=ctx, llm=llm, usage=usage)
-
-        if not report.verification_ok:
-            log.warning(
-                "email_guard judge unavailable for email=%s; marking unsafe",
-                current.email_id,
+    # Regenerate ONCE.
+    rewritten = regenerate_email(judged, ctx=ctx, llm=llm, usage=usage)
+    rejudged = verify_email(rewritten, llm=llm, usage=usage)
+    new_safety = rejudged.safety or EmailSafetyReport(
+        is_safe=False, confidence=0.0, verification_ok=False
+    )
+    return rejudged.model_copy(
+        update={
+            "safety": new_safety.model_copy(
+                update={
+                    "email_regenerated": True,
+                    "regeneration_count": 1,
+                }
             )
-            return _attach_report(
-                current, report, regenerated=regenerated, regen_count=regen_count
-            )
-
-        if report.final_email_safe:
-            return _attach_report(
-                current, report, regenerated=regenerated, regen_count=regen_count
-            )
-
-        # final_email_safe is False only because of target_fact failures
-        # (sender / generic / cta cannot mark the email unsafe).
-        if attempt >= MAX_REGENERATIONS:
-            return _attach_report(
-                current, report, regenerated=regenerated, regen_count=regen_count
-            )
-
-        current = regenerate_email(
-            current,
-            failed=report.failed_statements,
-            ctx=ctx,
-            llm=llm,
-            usage=usage,
-        )
-        regenerated = True
-        regen_count += 1
-
-    return current
+        }
+    )
 
 
 # ---------- Analytics ----------
 
 
-def build_statement_map(emails: list[Email]) -> list[ClaimMapEntry]:
-    entries: list[ClaimMapEntry] = []
-    for email in emails:
-        safety = email.safety
-        if not safety:
-            continue
-        for stmt in safety.statements:
-            citations: list[dict[str, str]] = []
-            for ref in stmt.context_refs:
-                url = ref.label if ref.label.startswith("http") else ""
-                citations.append(
-                    {
-                        "url": url,
-                        "snippet": ref.snippet[:280] if ref.snippet else ref.label,
-                    }
-                )
-            entries.append(
-                ClaimMapEntry(
-                    claim_id=stmt.statement_id,
-                    email_id=email.email_id,
-                    angle=email.angle,
-                    text=stmt.text,
-                    category=stmt.category,
-                    status=stmt.status,
-                    nli_score=stmt.nli_score,
-                    citations=citations,
-                )
-            )
-    return entries
-
-
-def accumulate_statement_metrics(
+def accumulate_safety_metrics(
     emails: list[Email],
-) -> dict[str, int | bool | list[str]]:
-    """Aggregate statement verification tallies across emails.
-
-    ``final_email_safe`` only reflects ``target_fact`` outcomes — sender
-    positioning and rhetoric never fail an email.
-    """
-    extracted = supported = unsupported = contradicted = not_checkable = 0
-    sender_unverified = 0
-    regeneration_count = 0
+) -> dict[str, int | bool | float | None]:
+    """Aggregate guardrail outcomes across emails for ``RunMetrics``."""
+    declared_total = 0
+    claims_total = 0
+    unsupported_total = 0
+    emails_safe = 0
+    emails_total = 0
+    confidences: list[float] = []
     email_regenerated = False
+    regeneration_count = 0
     final_email_safe = True
     verification_ok = True
-    failed: list[str] = []
 
     for email in emails:
+        emails_total += 1
+        declared_total += len(email.claims)
+        claims_total += len(email.claims)
+        for c in email.claims:
+            if c.scope in ("sender", "target") and c.grounded is False:
+                unsupported_total += 1
         safety = email.safety
         if not safety:
+            final_email_safe = False
+            verification_ok = False
             continue
         if safety.email_regenerated:
             email_regenerated = True
         regeneration_count += safety.regeneration_count
-        if not safety.final_email_safe:
-            final_email_safe = False
         if not safety.verification_ok:
             verification_ok = False
-        failed.extend(safety.failed_statements)
-        for stmt in safety.statements:
-            extracted += 1
-            if stmt.status == StatementSupportStatus.SUPPORTED:
-                supported += 1
-            elif stmt.status == StatementSupportStatus.UNSUPPORTED:
-                unsupported += 1
-            elif stmt.status == StatementSupportStatus.CONTRADICTED:
-                contradicted += 1
-            elif stmt.status == StatementSupportStatus.SENDER_CONTEXT_NOT_VERIFIED:
-                sender_unverified += 1
-            else:
-                not_checkable += 1
+        if safety.is_safe:
+            emails_safe += 1
+        else:
+            final_email_safe = False
+        confidences.append(safety.confidence)
 
+    avg_conf = round(mean(confidences), 3) if confidences else None
     return {
-        "extracted_statements_count": extracted,
-        "supported_statements_count": supported,
-        "unsupported_statements_count": unsupported,
-        "contradicted_statements_count": contradicted,
-        "not_checkable_statements_count": not_checkable + sender_unverified,
+        "declared_claims_count": declared_total,
+        "email_claims_count": claims_total,
+        "unsupported_claims_count": unsupported_total,
+        "safety_confidence_avg": avg_conf,
         "email_regenerated": email_regenerated,
         "regeneration_count": regeneration_count,
+        "emails_safe_count": emails_safe,
+        "emails_total": emails_total,
         "final_email_safe": final_email_safe,
         "verification_ok": verification_ok,
-        "failed_statements": failed,
     }
 
 
-# Re-export the writer's curated sender-evidence helper so the email_guard
-# node can reproduce the writer's exact subset without touching writer
-# internals.
-select_sender_evidence_for_verifier = writer_mod._select_sender_evidence
+select_sender_evidence_for_verifier = writer_mod.select_sender_evidence

@@ -14,6 +14,7 @@ import asyncio
 import logging
 import math
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -23,10 +24,12 @@ from ..pipeline import crawl, extract, planner, section_select, validate
 from ..schemas import (
     AngleType,
     Email,
+    ICP,
     Observation,
     PlannerDecision,
     PlannerInput,
     PlannerOutput,
+    ValueProposition,
 )
 from ..services.embed import Embedder
 from ..services.external import (
@@ -497,20 +500,26 @@ def make_sender_synthesize_node(*, llm: LLMClient) -> Callable[[FlowState], dict
         )
         _emit(state, "vp", {"message": "Synthesizing value proposition(s)…"})
 
-        icp_task = asyncio.create_task(
-            asyncio.to_thread(
+        async def _timed_icp() -> tuple[ICP, float]:
+            t0 = time.perf_counter()
+            result = await asyncio.to_thread(
                 sender_synth.synthesize_icp, usable, llm=llm, usage=usage
             )
-        )
-        vps_task = asyncio.create_task(
-            asyncio.to_thread(
+            return result, (time.perf_counter() - t0) * 1000.0
+
+        async def _timed_vps() -> tuple[list[ValueProposition], float]:
+            t0 = time.perf_counter()
+            result = await asyncio.to_thread(
                 sender_synth.synthesize_value_propositions,
                 usable,
                 llm=llm,
                 usage=usage,
             )
+            return result, (time.perf_counter() - t0) * 1000.0
+
+        (icp, icp_ms), (value_propositions, vp_ms) = await asyncio.gather(
+            _timed_icp(), _timed_vps()
         )
-        icp, value_propositions = await asyncio.gather(icp_task, vps_task)
 
         _emit(
             state,
@@ -523,6 +532,24 @@ def make_sender_synthesize_node(*, llm: LLMClient) -> Callable[[FlowState], dict
         )
 
         vp = value_props_store.primary_value_proposition(value_propositions)
+
+        tracker.add_stage(
+            "icp",
+            icp_ms,
+            {
+                "fields": 5,
+                "industries": len(icp.target_industries.values),
+                "buyers": len(icp.likely_buyers.values),
+            },
+        )
+        tracker.add_stage(
+            "vp",
+            vp_ms,
+            {
+                "count": len(value_propositions),
+                "primary": vp.label or "Primary",
+            },
+        )
 
         _emit(
             state,
@@ -976,6 +1003,23 @@ def _guard_context_from_state(state: FlowState) -> guard_mod.GuardContext:
     )
 
 
+def _apply_safety_tallies(metrics, tallies: dict) -> None:
+    """Copy the guardrail aggregates from ``accumulate_safety_metrics`` into ``RunMetrics``."""
+    metrics.declared_claims_count = int(tallies["declared_claims_count"])
+    metrics.email_claims_count = int(tallies["email_claims_count"])
+    metrics.unsupported_claims_count = int(tallies["unsupported_claims_count"])
+    avg_conf = tallies["safety_confidence_avg"]
+    metrics.safety_confidence_avg = (
+        float(avg_conf) if avg_conf is not None else None
+    )
+    metrics.email_regenerated = bool(tallies["email_regenerated"])
+    metrics.regeneration_count = int(tallies["regeneration_count"])
+    metrics.emails_safe_count = int(tallies["emails_safe_count"])
+    metrics.emails_total = int(tallies["emails_total"])
+    metrics.final_email_safe = bool(tallies["final_email_safe"])
+    metrics.verification_ok = bool(tallies["verification_ok"])
+
+
 def make_email_guard_node(
     *, llm: LLMClient, nli: NliValidator, embedder: Embedder,
 ) -> Callable[[FlowState], dict]:
@@ -1005,39 +1049,23 @@ def make_email_guard_node(
                     {"emails_done": i, "emails_total": len(emails)},
                 )
 
-            tallies = guard_mod.accumulate_statement_metrics(guarded)
-            st.detail.update(
-                {k: v for k, v in tallies.items() if k != "failed_statements"}
-            )
-            st.detail["failed_statements"] = len(tallies["failed_statements"])  # type: ignore[arg-type]
+            tallies = guard_mod.accumulate_safety_metrics(guarded)
+            st.detail.update(tallies)
             _emit(
                 state,
                 "email_guard_done",
                 {
-                    "extracted": tallies["extracted_statements_count"],
-                    "supported": tallies["supported_statements_count"],
+                    "declared": tallies["declared_claims_count"],
+                    "claims": tallies["email_claims_count"],
+                    "unsupported": tallies["unsupported_claims_count"],
+                    "safe_emails": tallies["emails_safe_count"],
+                    "total_emails": tallies["emails_total"],
+                    "confidence_avg": tallies["safety_confidence_avg"],
                     "unsafe": not tallies["final_email_safe"],
                     "verifier_ok": tallies["verification_ok"],
                 },
             )
-
-            m = tracker.metrics
-            m.extracted_statements_count = int(tallies["extracted_statements_count"])
-            m.supported_statements_count = int(tallies["supported_statements_count"])
-            m.unsupported_statements_count = int(
-                tallies["unsupported_statements_count"]
-            )
-            m.contradicted_statements_count = int(
-                tallies["contradicted_statements_count"]
-            )
-            m.not_checkable_statements_count = int(
-                tallies["not_checkable_statements_count"]
-            )
-            m.email_regenerated = bool(tallies["email_regenerated"])
-            m.regeneration_count = int(tallies["regeneration_count"])
-            m.final_email_safe = bool(tallies["final_email_safe"])
-            m.verification_ok = bool(tallies["verification_ok"])
-            m.failed_statements = list(tallies["failed_statements"])  # type: ignore[arg-type]
+            _apply_safety_tallies(tracker.metrics, tallies)
 
         return {"emails": guarded}
 
@@ -1088,37 +1116,8 @@ def make_analytics_node(
                             usage=usage,
                         )
                         emails[pain_idx] = repaired
-                        tallies = guard_mod.accumulate_statement_metrics(emails)
-                        tracker.metrics.extracted_statements_count = int(
-                            tallies["extracted_statements_count"]
-                        )
-                        tracker.metrics.supported_statements_count = int(
-                            tallies["supported_statements_count"]
-                        )
-                        tracker.metrics.unsupported_statements_count = int(
-                            tallies["unsupported_statements_count"]
-                        )
-                        tracker.metrics.contradicted_statements_count = int(
-                            tallies["contradicted_statements_count"]
-                        )
-                        tracker.metrics.not_checkable_statements_count = int(
-                            tallies["not_checkable_statements_count"]
-                        )
-                        tracker.metrics.email_regenerated = bool(
-                            tallies["email_regenerated"]
-                        )
-                        tracker.metrics.regeneration_count = int(
-                            tallies["regeneration_count"]
-                        )
-                        tracker.metrics.final_email_safe = bool(
-                            tallies["final_email_safe"]
-                        )
-                        tracker.metrics.verification_ok = bool(
-                            tallies["verification_ok"]
-                        )
-                        tracker.metrics.failed_statements = list(
-                            tallies["failed_statements"]  # type: ignore[arg-type]
-                        )
+                        tallies = guard_mod.accumulate_safety_metrics(emails)
+                        _apply_safety_tallies(tracker.metrics, tallies)
                         sim2 = overlap_mod.measure_overlap(
                             emails[0], emails[1], embedder
                         )
@@ -1142,35 +1141,8 @@ def make_analytics_node(
                         {"overlap": sim, "repaired": False},
                     )
 
-        claim_map = guard_mod.build_statement_map(emails)
-        tallies = guard_mod.accumulate_statement_metrics(emails)
-        m = tracker.metrics
-        m.extracted_statements_count = int(tallies["extracted_statements_count"])
-        m.supported_statements_count = int(tallies["supported_statements_count"])
-        m.unsupported_statements_count = int(tallies["unsupported_statements_count"])
-        m.contradicted_statements_count = int(tallies["contradicted_statements_count"])
-        m.not_checkable_statements_count = int(
-            tallies["not_checkable_statements_count"]
-        )
-        m.email_regenerated = bool(tallies["email_regenerated"])
-        m.regeneration_count = int(tallies["regeneration_count"])
-        m.final_email_safe = bool(tallies["final_email_safe"])
-        m.verification_ok = bool(tallies["verification_ok"])
-        m.failed_statements = list(tallies["failed_statements"])  # type: ignore[arg-type]
-        checkable = m.supported_statements_count + m.unsupported_statements_count + m.contradicted_statements_count
-        if checkable > 0:
-            m.evidence_support_rate = round(
-                m.supported_statements_count / checkable, 3
-            )
-        m.claims_total = m.extracted_statements_count
-        m.claims_supported = m.supported_statements_count
-        m.claims_unsupported = m.unsupported_statements_count
-        m.claims_contradicted = m.contradicted_statements_count
-        if m.extracted_statements_count > 0:
-            m.claim_support_rate = m.evidence_support_rate
-            m.unsupported_claim_rate = round(
-                m.unsupported_statements_count / m.extracted_statements_count, 3
-            )
+        tallies = guard_mod.accumulate_safety_metrics(emails)
+        _apply_safety_tallies(tracker.metrics, tallies)
 
         # Persist scoped to (target_company_id, persona_id). Re-running for
         # the same persona overwrites; running for a different persona keeps
@@ -1206,26 +1178,10 @@ def make_analytics_node(
                         e.subject, e.body, dumps(e.model_dump(mode="json")),
                     ),
                 )
-                conn.execute("DELETE FROM claim_map WHERE email_id = ?", (e.email_id,))
-            for c in claim_map:
-                conn.execute(
-                    "INSERT OR REPLACE INTO claim_map (claim_id, email_id, angle, text, status, nli_score, citations) VALUES (?,?,?,?,?,?,?)",
-                    (
-                        c.claim_id, c.email_id, c.angle.value, c.text,
-                        c.status.value, c.nli_score, dumps(list(c.citations)),
-                    ),
-                )
 
         tracker.log_artifact_json(
             "emails.json", [e.model_dump(mode="json") for e in emails]
         )
-        tracker.log_artifact_json(
-            "claim_map.json", [c.model_dump(mode="json") for c in claim_map]
-        )
-        # Totals
-        tracker.metrics.tokens_in = usage.tokens_in
-        tracker.metrics.tokens_out = usage.tokens_out
-        tracker.metrics.cost_usd = round(usage.cost_usd, 4)
-        return {"emails": emails, "claim_map": claim_map}
+        return {"emails": emails}
 
     return node

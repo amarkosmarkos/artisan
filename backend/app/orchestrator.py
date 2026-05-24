@@ -14,6 +14,7 @@ state machine.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -23,14 +24,17 @@ from typing import Callable
 from .db import fetchone, tx
 from .graph import run_sender_graph, run_target_graph
 from .graph.state import make_initial_state
+from .observability.llm_usage import apply_usage_to_metrics
 from .observability.tracker import RunTracker
 from .schemas import (
     ICP,
     PersonaInput,
     SenderResponse,
+    SuggestedTargetsResponse,
     TargetResponse,
     ValueProposition,
 )
+from .synthesis.target_discovery import discover_targets
 from .services.embed import get_embedder
 from .services.external import get_external_provider
 from .services.llm import UsageAccumulator, get_llm
@@ -196,13 +200,36 @@ async def run_sender_flow_async(
             tracker=tracker,
         )
         response = await run_sender_graph(initial_state=state, llm=llm, nli=nli)
+
+        progress("target_discovery", {"message": "Searching for target companies…"})
+        with tracker.stage("target_discovery") as st:
+            discovery: SuggestedTargetsResponse = await asyncio.to_thread(
+                discover_targets,
+                response.company_id,
+                llm=llm,
+                usage=usage,
+            )
+            st.detail["status"] = discovery.status
+            st.detail["suggestions"] = len(discovery.suggestions)
+        progress(
+            "target_discovery_done",
+            {
+                "status": discovery.status,
+                "suggestions": len(discovery.suggestions),
+            },
+        )
+        response = response.model_copy(update={"suggested_targets": discovery})
+
+        apply_usage_to_metrics(usage, tracker.metrics)
         tracker.finalize_metrics()
+        response = response.model_copy(update={"metrics": tracker.metrics})
         _persist_run_metrics(
             kind="sender",
             company_id=response.company_id,
             target_company_id=None,
             metrics_json=tracker.metrics.model_dump_json(),
         )
+
         progress("done", {
             "company_id": response.company_id,
             "observations": len(response.observations),
@@ -213,6 +240,8 @@ async def run_sender_flow_async(
                 "triggers": len(response.icp.common_triggers.values),
                 "negative": len(response.icp.negative_icp.values),
             },
+            "target_discovery_status": discovery.status,
+            "target_suggestions": len(discovery.suggestions),
         })
         return response
 
@@ -281,7 +310,9 @@ async def run_target_flow_async(
             embedder=embedder,
             external=external,
         )
+        apply_usage_to_metrics(usage, tracker.metrics)
         tracker.finalize_metrics()
+        response = response.model_copy(update={"metrics": tracker.metrics})
         _persist_run_metrics(
             kind="target",
             company_id=sender_company_id,
@@ -290,8 +321,10 @@ async def run_target_flow_async(
         )
         progress("done", {
             "target_company_id": response.target_company_id,
-            "extracted_statements_count": tracker.metrics.extracted_statements_count,
-            "supported_statements_count": tracker.metrics.supported_statements_count,
+            "declared_claims_count": tracker.metrics.declared_claims_count,
+            "email_claims_count": tracker.metrics.email_claims_count,
+            "unsupported_claims_count": tracker.metrics.unsupported_claims_count,
+            "safety_confidence_avg": tracker.metrics.safety_confidence_avg,
             "final_email_safe": tracker.metrics.final_email_safe,
             "angle_overlap": tracker.metrics.angle_overlap,
         })

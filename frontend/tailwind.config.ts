@@ -65,13 +65,18 @@ const config: Config = {
           "100%": { transform: "translateX(100%)" },
         },
         "fade-up": {
-          "0%": { opacity: "0", transform: "translateY(8px)" },
+          "0%": { opacity: "0", transform: "translateY(12px)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
+        },
+        "fade-in": {
+          "0%": { opacity: "0" },
+          "100%": { opacity: "1" },
         },
       },
       animation: {
         shimmer: "shimmer 1.6s infinite",
-        "fade-up": "fade-up 0.5s ease-out",
+        "fade-up": "fade-up 0.65s ease-out both",
+        "fade-in": "fade-in 0.5s ease-out both",
       },
     },
   },

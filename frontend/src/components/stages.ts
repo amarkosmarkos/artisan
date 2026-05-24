@@ -12,6 +12,7 @@ export type StageKey =
   | "web_search"
   | "icp"
   | "vp"
+  | "target_discovery"
   | "strategy"
   | "write_emails"
   | "email_guard"
@@ -32,6 +33,7 @@ export const SENDER_STAGES: StageDef[] = [
   { key: "planner",    label: "Planner review",         hint: "coverage check + bounded follow-up" },
   { key: "icp",        label: "Synthesize ICP",         hint: "industries / sizes / buyers / triggers" },
   { key: "vp",         label: "Value proposition",      hint: "customer / pain / outcome / mechanism" },
+  { key: "target_discovery", label: "Discover targets", hint: "web search for ICP-fit companies + roles" },
   { key: "done",       label: "Done",                   hint: "" },
 ];
 
@@ -44,10 +46,32 @@ export const TARGET_STAGES: StageDef[] = [
   { key: "web_search",    label: "External enrichment",  hint: "bounded, planner-gated" },
   { key: "strategy",      label: "Strategy artifact",    hint: "fit + persona + 2 angles" },
   { key: "write_emails",  label: "Write emails",         hint: "pain-led + trigger-led" },
-  { key: "email_guard",   label: "Verify email body",    hint: "extract statements + guard" },
+  { key: "email_guard",   label: "Guardrail",            hint: "extract claims from email; link retrieval evidence; is_safe + confidence" },
   { key: "angle_overlap", label: "Angle overlap",        hint: "diverge if too similar" },
   { key: "done",          label: "Done",                 hint: "" },
 ];
+
+/** Friendly labels for persisted Admin stage timelines (tracker stage names). */
+export const STAGE_LABELS: Record<string, string> = {
+  crawl: "Crawl",
+  section: "Section",
+  extract: "Extract observations",
+  validate: "Validate (NLI)",
+  planner: "Planner review",
+  fetch_more: "Fetch more pages",
+  web_search: "External enrichment",
+  icp: "Synthesize ICP",
+  vp: "Value proposition",
+  target_discovery: "Discover targets",
+  strategy: "Strategy artifact",
+  write_emails: "Write emails",
+  email_guard: "Guardrail",
+  angle_overlap: "Angle overlap",
+};
+
+export function stageLabel(name: string): string {
+  return STAGE_LABELS[name] ?? name.replace(/_/g, " ");
+}
 
 // Map raw event stage names to the canonical UI stage key.
 export function normalizeStage(stage: string): StageKey | null {
@@ -81,6 +105,8 @@ export function normalizeStage(stage: string): StageKey | null {
     return "icp";
   if (stage === "icp") return "icp";
   if (stage === "vp") return "vp";
+  if (stage === "target_discovery" || stage === "target_discovery_done")
+    return "target_discovery";
   if (stage === "strategy" || stage === "strategy_done") return "strategy";
   if (stage === "write_emails" || stage === "write_emails_done")
     return "write_emails";

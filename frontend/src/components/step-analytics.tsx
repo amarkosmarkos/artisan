@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { ArrowLeft, ExternalLink } from "lucide-react";
+import { ArrowLeft, Check, XOctagon, AlertTriangle } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { cn, formatCost, formatDuration, formatNumber } from "@/lib/utils";
+import { formatCost, formatDuration, formatNumber } from "@/lib/utils";
 import type { TargetResponse } from "@/lib/types";
 
 interface Props {
@@ -22,9 +22,16 @@ interface Props {
 
 export function StepAnalytics({ result, onBack }: Props) {
   const m = result.metrics;
+  const safeRate =
+    (m.emails_total ?? 0) > 0
+      ? (m.emails_safe_count ?? 0) / (m.emails_total ?? 0)
+      : null;
   const stats: { label: string; value: string; hint?: string }[] = [
     { label: "Latency", value: formatDuration(m.latency_ms) },
-    { label: "Tokens (in / out)", value: `${formatNumber(m.tokens_in)} / ${formatNumber(m.tokens_out)}` },
+    {
+      label: "Tokens (in / out)",
+      value: `${formatNumber(m.tokens_in)} / ${formatNumber(m.tokens_out)}`,
+    },
     { label: "Cost", value: formatCost(m.cost_usd) },
     { label: "Pages fetched", value: String(m.pages_fetched) },
     { label: "Sections processed", value: String(m.sections_created) },
@@ -40,21 +47,33 @@ export function StepAnalytics({ result, onBack }: Props) {
       hint: `${formatNumber(m.raw_cleaned_chars)} → ${formatNumber(m.evidence_chars_used)} chars`,
     },
     {
-      label: "Statements checked",
-      value: String(m.extracted_statements_count ?? m.claims_total ?? 0),
+      label: "Claims in emails",
+      value: String(m.email_claims_count ?? 0),
+      hint: `${m.unsupported_claims_count ?? 0} unsupported`,
     },
     {
-      label: "Unsupported statements",
-      value: String(m.unsupported_statements_count ?? m.claims_unsupported ?? 0),
+      label: "Emails safe",
+      value:
+        (m.emails_total ?? 0) === 0
+          ? "—"
+          : `${m.emails_safe_count ?? 0} / ${m.emails_total ?? 0}`,
+      hint: safeRate !== null ? pct(safeRate) : undefined,
     },
     {
-      label: "Email safe",
-      value: m.final_email_safe === false ? "no" : "yes",
+      label: "Guardrail confidence",
+      value:
+        m.safety_confidence_avg == null
+          ? "—"
+          : m.safety_confidence_avg.toFixed(2),
+      hint: "Average across all guardrail calls.",
     },
     {
       label: "Angle overlap",
-      value: m.angle_overlap === null ? "—" : m.angle_overlap.toFixed(3),
-      hint: m.angle_overlap !== null && m.angle_overlap > 0.78 ? "repaired" : undefined,
+      value: m.angle_overlap == null ? "—" : m.angle_overlap.toFixed(3),
+      hint:
+        m.angle_overlap != null && m.angle_overlap > 0.78
+          ? "repaired"
+          : undefined,
     },
   ];
 
@@ -153,97 +172,92 @@ export function StepAnalytics({ result, onBack }: Props) {
         </Card>
       </div>
 
-      <div className="mt-8">
+      <div className="mt-8 grid gap-6">
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Evidence chain</CardTitle>
+            <CardTitle className="text-base">Guardrail per email</CardTitle>
             <CardDescription>
-              Observation → strategy angle → email claim → verification status.
+              Claims the guardrail found in each email, linked to retrieval
+              evidence. General-knowledge claims skip verification.
             </CardDescription>
           </CardHeader>
-          <CardContent>
-            <div className="rounded-md border border-border/60">
-              <table className="w-full text-sm">
-                <thead className="text-xs uppercase tracking-wide text-muted-foreground">
-                  <tr className="border-b border-border/60">
-                    <th className="text-left font-medium px-3 py-2">Angle</th>
-                    <th className="text-left font-medium px-3 py-2">Claim</th>
-                    <th className="text-left font-medium px-3 py-2">Category</th>
-                    <th className="text-left font-medium px-3 py-2">Status</th>
-                    <th className="text-left font-medium px-3 py-2">NLI</th>
-                    <th className="text-left font-medium px-3 py-2">Citations</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.claim_map.map((c) => (
-                    <tr key={c.claim_id} className="border-b border-border/30 last:border-0">
-                      <td className="px-3 py-2 text-xs text-muted-foreground">
-                        {c.angle.replace("_", "-")}
-                      </td>
-                      <td className="px-3 py-2 max-w-md">
-                        <span className="line-clamp-2">{c.text}</span>
-                      </td>
-                      <td className="px-3 py-2 text-xs">
-                        {c.category === "target_fact"
-                          ? "target fact"
-                          : c.category === "sender_or_value_prop"
-                            ? "sender / value prop"
-                            : c.category === "cta"
-                              ? "CTA"
-                              : "generic"}
-                      </td>
-                      <td className="px-3 py-2">
-                        <span
-                          className={cn(
-                            "text-xs",
-                            c.status === "supported" &&
-                              "text-[hsl(var(--success))]",
-                            c.status === "contradicted" && "text-destructive",
-                            c.status === "unsupported" && "text-[hsl(var(--warning))]",
-                            (c.status === "not_checkable" ||
-                              c.status === "sender_context_not_verified") &&
-                              "text-muted-foreground"
-                          )}
+          <CardContent className="space-y-4">
+            {result.emails.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                No emails were generated.
+              </p>
+            )}
+            {result.emails.map((e) => {
+              const safety = e.safety;
+              const claims = e.claims ?? [];
+              const ungrounded = claims.filter(
+                (c) => c.scope !== "general" && c.grounded === false,
+              ).length;
+              return (
+                <div
+                  key={e.email_id}
+                  className="rounded-md border border-border/60 p-3 space-y-2"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline" className="capitalize">
+                      {e.angle.replace("_", "-")}
+                    </Badge>
+                    {safety ? (
+                      <>
+                        <Badge
+                          variant={safety.is_safe ? "success" : "destructive"}
+                          className="text-[10px]"
                         >
-                          {c.status === "sender_context_not_verified"
-                            ? "sender context not verified"
-                            : c.status}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 text-xs font-mono tabular-nums text-muted-foreground">
-                        {c.nli_score === null ? "—" : c.nli_score.toFixed(2)}
-                      </td>
-                      <td className="px-3 py-2">
-                        <ul className="flex flex-col gap-1">
-                          {c.citations.map((cit, i) => (
-                            <li key={i}>
-                              <a
-                                href={cit.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                              >
-                                <ExternalLink className="h-3 w-3" />
-                                <span className="truncate max-w-[180px]">
-                                  {safeHost(cit.url)}
-                                </span>
-                              </a>
-                            </li>
-                          ))}
-                        </ul>
-                      </td>
-                    </tr>
-                  ))}
-                  {result.claim_map.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="px-3 py-4 text-sm text-muted-foreground text-center">
-                        No claims recorded.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                          {safety.is_safe ? (
+                            <Check className="h-3 w-3" />
+                          ) : (
+                            <XOctagon className="h-3 w-3" />
+                          )}
+                          <span className="ml-0.5">
+                            {safety.is_safe ? "safe" : "unsafe"}
+                          </span>
+                        </Badge>
+                        <Badge
+                          variant={
+                            (safety.confidence ?? 0) >= 0.8
+                              ? "success"
+                              : (safety.confidence ?? 0) >= 0.5
+                                ? "default"
+                                : (safety.confidence ?? 0) > 0
+                                  ? "warning"
+                                  : "muted"
+                          }
+                          className="text-[10px]"
+                        >
+                          conf {(safety.confidence ?? 0).toFixed(2)}
+                        </Badge>
+                        {!safety.verification_ok && (
+                          <Badge variant="destructive" className="text-[10px]">
+                            verifier unavailable
+                          </Badge>
+                        )}
+                      </>
+                    ) : (
+                      <Badge variant="muted" className="text-[10px]">
+                        not run
+                      </Badge>
+                    )}
+                    <Badge variant="outline" className="text-[10px] font-mono">
+                      {claims.length} claims
+                    </Badge>
+                    {ungrounded > 0 && (
+                      <Badge variant="warning" className="text-[10px]">
+                        <AlertTriangle className="h-3 w-3" />
+                        <span className="ml-0.5">{ungrounded} not grounded</span>
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-sm font-medium text-foreground/90 line-clamp-1">
+                    {e.subject}
+                  </p>
+                </div>
+              );
+            })}
           </CardContent>
         </Card>
       </div>
@@ -254,12 +268,4 @@ export function StepAnalytics({ result, onBack }: Props) {
 function pct(v: number | null) {
   if (v === null) return "—";
   return `${Math.round(v * 100)}%`;
-}
-
-function safeHost(url: string) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    return url;
-  }
 }

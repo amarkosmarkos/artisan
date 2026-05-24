@@ -14,7 +14,6 @@ from typing import Any, Callable, Optional, TypedDict
 
 from ..observability.tracker import RunTracker
 from ..schemas import (
-    ClaimMapEntry,
     Email,
     ICP,
     Observation,
@@ -64,7 +63,6 @@ class FlowState(TypedDict, total=False):
     # ---- Target outputs ----
     strategy: Optional[StrategyArtifact]
     emails: list[Email]
-    claim_map: list[ClaimMapEntry]
     repair_done: bool
 
     # ---- Services & observability ----
@@ -116,7 +114,6 @@ def make_initial_state(
         value_propositions=[],
         strategy=None,
         emails=[],
-        claim_map=[],
         repair_done=False,
         progress=progress,
         usage=usage,
